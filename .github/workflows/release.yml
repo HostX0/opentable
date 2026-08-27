@@ -52,7 +52,13 @@ jobs:
             exit 0
           fi
           mkdir -p ~/private_keys
-          echo "$APPLE_API_KEY_P8" | base64 --decode > ~/private_keys/AuthKey.p8
+          # macOS ships BSD base64, which has no --decode; openssl is portable
+          printf '%s' "$APPLE_API_KEY_P8" | openssl base64 -d -A > ~/private_keys/AuthKey.p8
+          if ! grep -q "PRIVATE KEY" ~/private_keys/AuthKey.p8; then
+            echo "::error::APPLE_API_KEY_P8 did not decode to a private key — re-copy it with: base64 -i AuthKey_XXX.p8 | pbcopy"
+            exit 1
+          fi
+          chmod 600 ~/private_keys/AuthKey.p8
           echo "APPLE_API_KEY=$HOME/private_keys/AuthKey.p8" >> "$GITHUB_ENV"
 
       - name: Build and publish

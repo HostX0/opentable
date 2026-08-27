@@ -67,7 +67,7 @@ linux:
     - AppImage
     - deb
   category: Development
-  maintainer: Mohammed K
+  maintainer: Mohammed K <alrasamking123@gmail.com>
   synopsis: A clean, fast SQL editor for PostgreSQL, MySQL and SQLite
 
 # ————————————————————————— auto-update —————————————————————————

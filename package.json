@@ -4,7 +4,10 @@
   "version": "0.1.1",
   "description": "A clean, fast SQL editor for PostgreSQL, MySQL and SQLite.",
   "main": "./out/main/index.js",
-  "author": "Mohammed K",
+  "author": {
+    "name": "Mohammed K",
+    "email": "alrasamking123@gmail.com"
+  },
   "private": true,
   "scripts": {
     "dev": "electron-vite dev --watch",
@@ -48,5 +51,14 @@
     "electron-vite": "^5.0.0",
     "typescript": "^7.0.2",
     "vite": "^7.3.6"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mohammedkmo/OpenTable.git"
+  },
+  "homepage": "https://github.com/mohammedkmo/OpenTable",
+  "bugs": {
+    "url": "https://github.com/mohammedkmo/OpenTable/issues"
+  },
+  "license": "MIT"
 }
