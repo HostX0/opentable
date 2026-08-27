@@ -35,6 +35,15 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Stage the notarisation key
+        if: matrix.os == 'macos-latest' && env.APPLE_API_KEY_P8 != ''
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          mkdir -p ~/private_keys
+          echo "$APPLE_API_KEY_P8" | base64 --decode > ~/private_keys/AuthKey.p8
+          echo "APPLE_API_KEY=$HOME/private_keys/AuthKey.p8" >> "$GITHUB_ENV"
+
       - name: Build and publish
         run: npx electron-builder ${{ matrix.target }} --publish always
         env:
@@ -45,9 +54,8 @@ jobs:
           # unsigned and CANNOT auto-update — see docs/RELEASING.md.
           CSC_LINK: ${{ secrets.MAC_CERT_P12 }}
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
 
           # Windows signing (optional; unsigned installers trigger SmartScreen).
           WIN_CSC_LINK: ${{ secrets.WIN_CERT_PFX }}
