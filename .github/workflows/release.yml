@@ -7,6 +7,11 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Creating a GitHub Release needs write access to repository contents.
+# GITHUB_TOKEN is read-only by default, which fails the publish step with 403.
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
