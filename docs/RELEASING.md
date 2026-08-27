@@ -12,6 +12,55 @@ npm run check:signing
 
 ---
 
+## First-time setup
+
+A one-off checklist. Steps 2–4 need your Apple Developer account; everything
+else is already in the repository.
+
+### 1. Push to GitHub
+
+Create a repository named `opentable` under your account, then:
+
+```bash
+git remote add origin https://github.com/mohammedkmo/opentable.git
+git push -u origin main
+```
+
+The repository name must match `publish.repo` in `electron-builder.yml`.
+
+### 2. Create a Developer ID Application certificate
+
+See [One-time macOS setup](#one-time-macos-setup) below. This is the step that
+makes macOS auto-update possible at all.
+
+### 3. Create an App Store Connect API key
+
+Also below. Export the three variables in your shell profile so local builds
+can notarise.
+
+### 4. Add the CI secrets
+
+Under **Settings → Secrets and variables → Actions**, add the five macOS
+secrets listed in [CI secrets](#ci-secrets).
+
+### 5. Cut the first release
+
+```bash
+npm run check:signing        # should be all green
+git tag v0.1.0
+git push origin main --tags
+```
+
+Watch it build under the **Actions** tab. When it finishes, a GitHub Release
+appears with installers for all three platforms plus the `latest*.yml` files
+that make auto-update work.
+
+> **Tip:** you can push a tag *before* sorting out certificates to prove the
+> pipeline works end to end. Windows and Linux will build and auto-update
+> normally; the macOS build will simply be unsigned, and CI will say so.
+
+---
+
 ## Why macOS signing is not optional
 
 **An unsigned macOS build can never auto-update.** Squirrel refuses to replace
