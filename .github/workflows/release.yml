@@ -35,11 +35,17 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # A step's own `env` is not visible to its `if`, so the presence check
+      # happens inside the script rather than in a condition.
       - name: Stage the notarisation key
-        if: matrix.os == 'macos-latest' && env.APPLE_API_KEY_P8 != ''
+        if: matrix.os == 'macos-latest'
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
+          if [ -z "$APPLE_API_KEY_P8" ]; then
+            echo "::warning::No APPLE_API_KEY_P8 secret — the macOS build will be unsigned and cannot auto-update."
+            exit 0
+          fi
           mkdir -p ~/private_keys
           echo "$APPLE_API_KEY_P8" | base64 --decode > ~/private_keys/AuthKey.p8
           echo "APPLE_API_KEY=$HOME/private_keys/AuthKey.p8" >> "$GITHUB_ENV"
