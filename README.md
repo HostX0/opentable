@@ -151,3 +151,4 @@ Fonts: Inter for the interface, JetBrains Mono for SQL and data.
 ## Licence
 
 [MIT](LICENSE) © Mohammed K
+# OpenTable
