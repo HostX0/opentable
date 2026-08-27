@@ -146,9 +146,27 @@ git push --follow-tags
 ```
 
 Pushing the tag triggers `.github/workflows/release.yml`, which builds macOS,
-Windows and Linux in parallel and publishes them to a GitHub Release together
-with the `latest*.yml` metadata that `electron-updater` reads. Existing installs
-pick it up within hours.
+Windows and Linux in parallel and uploads them, together with the `latest*.yml`
+metadata `electron-updater` reads, into a **draft** release.
+
+Nothing is public yet. Open the draft under **Releases** and confirm it has:
+
+| Platform | Files |
+| --- | --- |
+| macOS | `.dmg` and `.zip` for both `arm64` and `x64`, plus `latest-mac.yml` |
+| Windows | `.exe` installers, plus `latest.yml` |
+| Linux | `.AppImage` and `.deb`, plus `latest-linux.yml` |
+
+The `latest*.yml` files are what make auto-update work — a release without them
+updates nobody. When it all looks right, press **Publish release**.
+
+If a platform failed, delete the draft and re-run the workflow. Because the
+release was never published, the tag can be reused.
+
+> The macOS job now **fails** when the signing secrets are missing rather than
+> shipping an unsigned app, which Gatekeeper shows to users as
+> *"OpenTable is damaged and can't be opened"*. To build unsigned on purpose,
+> set the repository variable `ALLOW_UNSIGNED_MAC=true`.
 
 ### CI secrets
 

@@ -78,7 +78,11 @@ publish:
   provider: github
   owner: mohammedkmo
   repo: OpenTable
-  releaseType: release
+  # Every platform uploads into the same draft. Drafts are invisible to users
+  # and ignored by electron-updater, so a run that fails on one platform can
+  # be deleted and retried on the same tag. Promote it by hand in the
+  # Releases page once all the installers are present.
+  releaseType: draft
 
 # node:sqlite is built into Electron, and pg/mysql2/ssh2 are pure JS,
 # so there are no native modules to rebuild.

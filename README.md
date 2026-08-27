@@ -130,11 +130,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for more.
 
 ## Releasing
 
-Tag a commit and CI does the rest:
+Tag a commit and CI builds all three platforms:
 
 ```bash
 npm version minor && git push --follow-tags
 ```
+
+The build uploads into a **draft** release. Drafts are invisible to users and
+ignored by the updater, so check every installer is present, then press
+**Publish release** to ship it.
 
 ⚠️ **macOS builds must be code signed to auto-update.** An unsigned build can
 detect a new version but can never install it — Squirrel refuses to replace an
