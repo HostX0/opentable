@@ -47,6 +47,8 @@ jobs:
 
       # A step's own `env` is not visible to its `if`, so the presence check
       # happens inside the script rather than in a condition.
+      # A step's own `env` is not visible to its `if`, so the presence check
+      # happens inside the script rather than in a condition.
       - name: Stage the notarisation key
         if: matrix.os == 'macos-latest'
         env:
@@ -57,14 +59,28 @@ jobs:
             exit 0
           fi
           mkdir -p ~/private_keys
-          # macOS ships BSD base64, which has no --decode; openssl is portable
-          printf '%s' "$APPLE_API_KEY_P8" | openssl base64 -d -A > ~/private_keys/AuthKey.p8
-          if ! grep -q "PRIVATE KEY" ~/private_keys/AuthKey.p8; then
-            echo "::error::APPLE_API_KEY_P8 did not decode to a private key — re-copy it with: base64 -i AuthKey_XXX.p8 | pbcopy"
+          key=~/private_keys/AuthKey.p8
+
+          # Accept either form of the secret: the base64 of the .p8 (what the
+          # docs ask for) or the .p8 text pasted in directly. Whitespace is
+          # stripped first so base64 wrapped at any width still decodes.
+          if printf '%s' "$APPLE_API_KEY_P8" | grep -q "BEGIN .*PRIVATE KEY"; then
+            printf '%s' "$APPLE_API_KEY_P8" > "$key"
+          else
+            printf '%s' "$APPLE_API_KEY_P8" | tr -d '[:space:]' | openssl base64 -d -A > "$key" 2>/dev/null || true
+          fi
+
+          # openssl parses it, so a truncated or wrong-file secret fails here
+          # rather than three minutes later inside notarytool.
+          if ! openssl pkey -in "$key" -noout 2>/dev/null; then
+            echo "::error::APPLE_API_KEY_P8 is not a usable private key."
+            echo "It holds ${#APPLE_API_KEY_P8} characters. Re-create it from the .p8 Apple gave you:"
+            echo "    base64 -i AuthKey_XXXXXXXXXX.p8 | pbcopy"
+            echo "then paste into Settings > Secrets and variables > Actions > APPLE_API_KEY_P8."
             exit 1
           fi
-          chmod 600 ~/private_keys/AuthKey.p8
-          echo "APPLE_API_KEY=$HOME/private_keys/AuthKey.p8" >> "$GITHUB_ENV"
+          chmod 600 "$key"
+          echo "APPLE_API_KEY=$key" >> "$GITHUB_ENV"
 
       - name: Build and publish
         run: npx electron-builder ${{ matrix.target }} --publish always
