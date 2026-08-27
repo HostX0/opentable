@@ -47,28 +47,50 @@ jobs:
 
       # electron-builder only *warns* when it cannot sign, then publishes an
       # unsigned macOS app that Gatekeeper reports to users as "damaged".
-      # Fail here instead, unless the release is deliberately unsigned.
-      - name: Require macOS signing credentials
+      # Check the certificate here so a bad secret fails the run with a precise
+      # reason. Deliberately pure openssl: importing into a keychain and asking
+      # `security find-identity -v` would also reject a perfectly good
+      # certificate whose intermediate CA is not bundled with it.
+      - name: Verify the signing certificate
         if: matrix.os == 'macos-latest'
         env:
           CSC_LINK: ${{ secrets.MAC_CERT_P12 }}
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
           ALLOW_UNSIGNED: ${{ vars.ALLOW_UNSIGNED_MAC }}
         run: |
-          missing=""
-          [ -z "$CSC_LINK" ] && missing="$missing MAC_CERT_P12"
-          [ -z "$CSC_KEY_PASSWORD" ] && missing="$missing MAC_CERT_PASSWORD"
-          if [ -n "$missing" ]; then
+          fail () {
+            rm -f cert.p12
             if [ "$ALLOW_UNSIGNED" = "true" ]; then
-              echo "::warning::Unsigned macOS build (missing:$missing) — ALLOW_UNSIGNED_MAC is set."
+              echo "::warning::$1 — continuing unsigned because ALLOW_UNSIGNED_MAC is set."
               exit 0
             fi
-            echo "::error::Missing secret(s):$missing"
-            echo "An unsigned macOS build opens as \"OpenTable is damaged\" on every other Mac"
-            echo "and can never auto-update. See docs/RELEASING.md for how to produce these."
-            echo "To ship unsigned anyway, set repository variable ALLOW_UNSIGNED_MAC=true."
+            echo "::error::$1"
+            echo "An unsigned macOS build opens as \"OpenTable is damaged\" on every other"
+            echo "Mac and can never auto-update. See docs/RELEASING.md."
             exit 1
-          fi
+          }
+
+          [ -n "$CSC_LINK" ]         || fail "Secret MAC_CERT_P12 is not set."
+          [ -n "$CSC_KEY_PASSWORD" ] || fail "Secret MAC_CERT_PASSWORD is not set."
+
+          printf '%s' "$CSC_LINK" | tr -d '[:space:]' | openssl base64 -d -A > cert.p12 2>/dev/null || true
+          size=$(wc -c < cert.p12 | tr -d ' ')
+
+          info=$(openssl pkcs12 -in cert.p12 -info -noout -passin pass:"$CSC_KEY_PASSWORD" 2>&1) \
+            || fail "MAC_CERT_P12 ($size bytes decoded) will not open with MAC_CERT_PASSWORD. Either the base64 is wrong (redo with: base64 -i cert.p12 | pbcopy) or the password is not the one you set when exporting the .p12 — it is not your Mac login or Apple ID password."
+
+          # A .p12 exported with the certificate alone imports fine but cannot sign.
+          printf '%s' "$info" | grep -qiE "keybag|key bag" \
+            || fail "MAC_CERT_P12 contains a certificate but no private key. In Keychain Access, expand the certificate with the arrow and select BOTH the certificate and the key underneath, then export the pair."
+
+          subjects=$(openssl pkcs12 -in cert.p12 -nokeys -passin pass:"$CSC_KEY_PASSWORD" 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)
+          case "$subjects" in
+            *"Developer ID Application"*) : ;;
+            *) fail "MAC_CERT_P12 is not a Developer ID Application certificate (subject: ${subjects:-unreadable}). An 'Apple Development' or 'Mac Developer' certificate cannot sign apps for distribution outside the App Store." ;;
+          esac
+
+          rm -f cert.p12
+          echo "Certificate OK — $subjects"
 
       # A step's own `env` is not visible to its `if`, so the presence check
       # happens inside the script rather than in a condition.
