@@ -47,10 +47,14 @@ jobs:
 
       # electron-builder only *warns* when it cannot sign, then publishes an
       # unsigned macOS app that Gatekeeper reports to users as "damaged".
-      # Check the certificate here so a bad secret fails the run with a precise
-      # reason. Deliberately pure openssl: importing into a keychain and asking
-      # `security find-identity -v` would also reject a perfectly good
-      # certificate whose intermediate CA is not bundled with it.
+      # Import the certificate into a scratch keychain first so a bad secret
+      # fails the run naming exactly what is wrong.
+      #
+      # Uses `security`, not openssl: LibreSSL (what /usr/bin/openssl is on
+      # macOS) cannot always decrypt a .p12 produced by Keychain Access. And
+      # `find-identity` runs WITHOUT -v on purpose — -v additionally requires a
+      # validated chain, so it hides a perfectly good certificate whose
+      # intermediate CA is not bundled alongside it.
       - name: Verify the signing certificate
         if: matrix.os == 'macos-latest'
         env:
@@ -59,7 +63,7 @@ jobs:
           ALLOW_UNSIGNED: ${{ vars.ALLOW_UNSIGNED_MAC }}
         run: |
           fail () {
-            rm -f cert.p12
+            rm -f cert.p12; security delete-keychain probe.keychain 2>/dev/null || true
             if [ "$ALLOW_UNSIGNED" = "true" ]; then
               echo "::warning::$1 — continuing unsigned because ALLOW_UNSIGNED_MAC is set."
               exit 0
@@ -76,21 +80,23 @@ jobs:
           printf '%s' "$CSC_LINK" | tr -d '[:space:]' | openssl base64 -d -A > cert.p12 2>/dev/null || true
           size=$(wc -c < cert.p12 | tr -d ' ')
 
-          info=$(openssl pkcs12 -in cert.p12 -info -noout -passin pass:"$CSC_KEY_PASSWORD" 2>&1) \
-            || fail "MAC_CERT_P12 ($size bytes decoded) will not open with MAC_CERT_PASSWORD. Either the base64 is wrong (redo with: base64 -i cert.p12 | pbcopy) or the password is not the one you set when exporting the .p12 — it is not your Mac login or Apple ID password."
+          security create-keychain -p probe probe.keychain
+          security unlock-keychain -p probe probe.keychain
+          security import cert.p12 -k probe.keychain -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign >/dev/null 2>&1 \
+            || fail "MAC_CERT_P12 ($size bytes decoded) could not be imported with MAC_CERT_PASSWORD. Either the base64 is wrong (redo with: base64 -i cert.p12 | tr -d '\\n' | pbcopy) or the password is not the one set when exporting the .p12 — it is not your Mac login or Apple ID password."
 
-          # A .p12 exported with the certificate alone imports fine but cannot sign.
-          printf '%s' "$info" | grep -qiE "keybag|key bag" \
-            || fail "MAC_CERT_P12 contains a certificate but no private key. In Keychain Access, expand the certificate with the arrow and select BOTH the certificate and the key underneath, then export the pair."
+          found=$(security find-identity -p codesigning probe.keychain 2>/dev/null)
+          total=$(printf '%s' "$found" | grep -cE '^ +[0-9]+\)' || true)
+          devid=$(printf '%s' "$found" | grep -c "Developer ID Application" || true)
 
-          subjects=$(openssl pkcs12 -in cert.p12 -nokeys -passin pass:"$CSC_KEY_PASSWORD" 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)
-          case "$subjects" in
-            *"Developer ID Application"*) : ;;
-            *) fail "MAC_CERT_P12 is not a Developer ID Application certificate (subject: ${subjects:-unreadable}). An 'Apple Development' or 'Mac Developer' certificate cannot sign apps for distribution outside the App Store." ;;
-          esac
+          [ "$total" -gt 0 ] \
+            || fail "MAC_CERT_P12 imported but yielded no code-signing identity, which means it holds the certificate without its private key. In Keychain Access, click the arrow to expand the certificate and select BOTH it and the key nested underneath, then export the pair."
 
-          rm -f cert.p12
-          echo "Certificate OK — $subjects"
+          [ "$devid" -gt 0 ] \
+            || fail "MAC_CERT_P12 is the wrong certificate: $(printf '%s' "$found" | grep -oE '\"[^\"]+\"' | head -1). Distributing outside the App Store needs a 'Developer ID Application' certificate; an 'Apple Development' one only runs on your own registered devices."
+
+          printf '%s' "$found" | grep "Developer ID Application" | sed 's/^/  /'
+          rm -f cert.p12; security delete-keychain probe.keychain 2>/dev/null || true
 
       # A step's own `env` is not visible to its `if`, so the presence check
       # happens inside the script rather than in a condition.
