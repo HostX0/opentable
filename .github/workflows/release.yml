@@ -28,9 +28,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -39,6 +39,11 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      # electron-builder only packages — it does not compile. Without this the
+      # out/ directory is missing and packaging fails on every platform.
+      - name: Build
+        run: npm run build
 
       # A step's own `env` is not visible to its `if`, so the presence check
       # happens inside the script rather than in a condition.
