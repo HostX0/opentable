@@ -10,6 +10,10 @@ PostgreSQL, MySQL/MariaDB and SQLite — locally or through an SSH tunnel.
 [![CI](https://github.com/mohammedkmo/opentable/actions/workflows/ci.yml/badge.svg)](https://github.com/mohammedkmo/opentable/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
 
+<br />
+
+<img src="brand/screenshot.jpg" alt="OpenTable browsing a PostgreSQL database" width="100%" />
+
 </div>
 
 ---
@@ -155,4 +159,3 @@ Fonts: Inter for the interface, JetBrains Mono for SQL and data.
 ## Licence
 
 [MIT](LICENSE) © Mohammed K
-# OpenTable
