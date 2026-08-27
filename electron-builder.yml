@@ -1,0 +1,85 @@
+appId: com.mohammedk.opentable
+productName: OpenTable
+copyright: Copyright © 2026 Mohammed K
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - out/**
+  - package.json
+
+asarUnpack:
+  - '**/*.node'
+
+# ————————————————————————— macOS —————————————————————————
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  # Signing + notarization: requires an Apple Developer account.
+  # Set these before running `npm run dist:mac`:
+  #   export APPLE_ID="you@example.com"
+  #   export APPLE_APP_SPECIFIC_PASSWORD="xxxx-xxxx-xxxx-xxxx"
+  #   export APPLE_TEAM_ID="XXXXXXXXXX"
+  #   export CSC_LINK=/path/to/DeveloperIDApplication.p12
+  #   export CSC_KEY_PASSWORD="p12 password"
+  # Without them the build still succeeds but ships UNSIGNED — macOS Gatekeeper
+  # will refuse to open it on any machine other than the one that built it.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: true
+
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+# ————————————————————————— Windows —————————————————————————
+win:
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+  # Code signing (optional but strongly recommended — unsigned installers get
+  # SmartScreen warnings). Set CSC_LINK / CSC_KEY_PASSWORD to your .pfx.
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+
+# ————————————————————————— Linux —————————————————————————
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+  maintainer: Mohammed K
+  synopsis: A clean, fast SQL editor for PostgreSQL, MySQL and SQLite
+
+# ————————————————————————— auto-update —————————————————————————
+# The update feed. electron-updater reads this to find new versions, and
+# electron-builder publishes here when run with `--publish always`.
+# See docs/RELEASING.md for the full process.
+publish:
+  provider: github
+  owner: mohammedkmo
+  repo: opentable
+  releaseType: release
+
+# node:sqlite is built into Electron, and pg/mysql2/ssh2 are pure JS,
+# so there are no native modules to rebuild.
+npmRebuild: false

@@ -1,0 +1,16 @@
+node_modules/
+out/
+release/
+dist/
+
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# signing material must never be committed
+*.p12
+*.pfx
+*.cer
+*.mobileprovision

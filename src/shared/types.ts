@@ -1,0 +1,173 @@
+export type Driver = 'postgres' | 'mysql' | 'sqlite'
+
+/** Visual + safety tier for a connection. `production` gates destructive queries. */
+export type Environment = 'local' | 'staging' | 'production'
+
+export interface SshConfig {
+  enabled: boolean
+  /** 'agent' authenticates via ssh-agent and ignores password/key fields */
+  authMethod?: 'password' | 'key' | 'agent'
+  host: string
+  port: number
+  user: string
+  password?: string
+  privateKeyPath?: string
+  passphrase?: string
+}
+
+export interface ConnectionConfig {
+  id: string
+  name: string
+  driver: Driver
+  host: string
+  port: number
+  user: string
+  password?: string
+  database: string
+  /** sqlite only: absolute path to the .db/.sqlite file */
+  filePath?: string
+  ssl?: boolean
+  /** Explicit opt-in: accept self-signed / unverified server certificates */
+  sslInsecure?: boolean
+  ssh?: SshConfig
+  environment?: Environment
+  color?: string
+}
+
+/** Config as stored on disk / sent to renderer — password fields stripped or kept encrypted */
+export type ConnectionSummary = Omit<ConnectionConfig, 'password' | 'ssh'> & {
+  hasPassword: boolean
+  ssh?: Omit<SshConfig, 'password' | 'passphrase'>
+}
+
+export interface ResultSet {
+  columns: string[]
+  rows: unknown[][]
+  rowCount: number
+  command?: string
+  /** Present when every column comes from a single table — enables inline editing */
+  sourceTable?: { schema: string; name: string }
+  /** Column names forming the primary key of sourceTable */
+  primaryKey?: string[]
+  /** Why inline editing is unavailable, shown quietly in the toolbar */
+  readOnlyReason?: string
+  truncated?: boolean
+}
+
+export interface QueryResult {
+  sets: ResultSet[]
+  elapsedMs: number
+}
+
+export interface SchemaColumn {
+  name: string
+  dataType: string
+  nullable: boolean
+  isPrimary: boolean
+  defaultValue?: string | null
+}
+
+export interface SchemaTable {
+  schema: string
+  name: string
+  kind: 'table' | 'view'
+  columns: SchemaColumn[]
+}
+
+export interface DbSchema {
+  /** Database the schema was read from */
+  database: string
+  tables: SchemaTable[]
+}
+
+export interface IndexInfo {
+  name: string
+  columns: string[]
+  unique: boolean
+  primary: boolean
+}
+
+export interface ForeignKeyInfo {
+  name: string
+  columns: string[]
+  refSchema: string
+  refTable: string
+  refColumns: string[]
+}
+
+export interface TableDetails {
+  schema: string
+  name: string
+  kind: 'table' | 'view'
+  columns: SchemaColumn[]
+  indexes: IndexInfo[]
+  foreignKeys: ForeignKeyInfo[]
+  rowCount: number | null
+  ddl: string
+}
+
+export interface ConnectResult {
+  ok: boolean
+  error?: string
+  serverVersion?: string
+}
+
+/* ————————————————————— data editing ————————————————————— */
+
+export interface RowIdentity {
+  /** primary key column -> original value, used to target the UPDATE/DELETE */
+  keys: Record<string, unknown>
+}
+
+export type PendingChange =
+  | { kind: 'update'; identity: RowIdentity; values: Record<string, unknown> }
+  | { kind: 'insert'; values: Record<string, unknown> }
+  | { kind: 'delete'; identity: RowIdentity }
+
+export interface ApplyResult {
+  ok: boolean
+  error?: string
+  affected?: number
+  /** SQL that was executed, for the review panel / history */
+  statements?: string[]
+}
+
+/* ————————————————————— history & saved queries ————————————————————— */
+
+export interface HistoryEntry {
+  id: string
+  connectionId: string
+  connectionName: string
+  database: string
+  sql: string
+  ranAt: number
+  elapsedMs: number
+  rowCount: number
+  ok: boolean
+  error?: string
+}
+
+export interface SavedQuery {
+  id: string
+  name: string
+  sql: string
+  connectionId?: string
+  updatedAt: number
+}
+
+/* ————————————————————— settings & AI ————————————————————— */
+
+export interface AppSettings {
+  /** Rows fetched before OpenTable adds its own LIMIT guard */
+  defaultRowLimit: number
+  confirmDestructive: boolean
+  hasAiKey: boolean
+  aiModel: string
+}
+
+export interface AiResult {
+  ok: boolean
+  sql?: string
+  explanation?: string
+  error?: string
+}
