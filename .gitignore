@@ -13,4 +13,8 @@ dist/
 *.p12
 *.pfx
 *.cer
+*.p8
+AuthKey_*
+*.keychain
+*.keychain-db
 *.mobileprovision
