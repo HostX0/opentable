@@ -20,6 +20,17 @@ function backgroundFor(): string {
   return nativeTheme.shouldUseDarkColors ? '#191919' : '#ffffff'
 }
 
+function openExternalIfAllowed(url: string): void {
+  try {
+    const protocol = new URL(url).protocol
+    if (protocol === 'https:' || protocol === 'http:' || protocol === 'mailto:') {
+      void shell.openExternal(url)
+    }
+  } catch {
+    /* malformed/exotic URLs stay inside the denied navigation */
+  }
+}
+
 function createWindow(): void {
   const win = new BrowserWindow({
     width: 1280,
@@ -38,7 +49,7 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       spellcheck: false
     }
   })
@@ -46,8 +57,24 @@ function createWindow(): void {
   win.on('ready-to-show', () => win.show())
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    openExternalIfAllowed(url)
     return { action: 'deny' }
+  })
+
+  // A Markdown link without target=_blank must not replace the whole Electron
+  // renderer with an arbitrary remote page. Development hot-reload stays local.
+  win.webContents.on('will-navigate', (event, url) => {
+    const current = win.webContents.getURL()
+    try {
+      const nextUrl = new URL(url)
+      const currentUrl = new URL(current)
+      if (nextUrl.origin === currentUrl.origin) return
+    } catch {
+      // file:// URLs have a null origin; exact local navigation is harmless.
+      if (url.startsWith('file:') && current.startsWith('file:')) return
+    }
+    event.preventDefault()
+    openExternalIfAllowed(url)
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
