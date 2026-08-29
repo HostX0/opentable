@@ -3,6 +3,13 @@ export type Driver = 'postgres' | 'mysql' | 'sqlite'
 /** Visual + safety tier for a connection. `production` gates destructive queries. */
 export type Environment = 'local' | 'staging' | 'production'
 
+export type ReferentialAction =
+  | 'NO ACTION'
+  | 'CASCADE'
+  | 'SET NULL'
+  | 'RESTRICT'
+  | 'SET DEFAULT'
+
 export interface SshConfig {
   enabled: boolean
   /** 'agent' authenticates via ssh-agent and ignores password/key fields */
@@ -61,9 +68,11 @@ export interface QueryResult {
 
 export interface SchemaColumn {
   name: string
+  /** Exact dialect type when the server exposes it, e.g. varchar(255), numeric(12,2), int unsigned. */
   dataType: string
   nullable: boolean
   isPrimary: boolean
+  /** SQL expression suitable for DEFAULT, not a display-only decoded value. */
   defaultValue?: string | null
 }
 
@@ -85,6 +94,10 @@ export interface IndexInfo {
   columns: string[]
   unique: boolean
   primary: boolean
+  /** SQLite pragma index_list origin: c=create index, u=UNIQUE constraint, pk=primary key. */
+  origin?: string
+  /** Raw CREATE INDEX definition when the dialect exposes one. Useful for lossless rebuilds. */
+  definition?: string
 }
 
 export interface ForeignKeyInfo {
@@ -93,6 +106,8 @@ export interface ForeignKeyInfo {
   refSchema: string
   refTable: string
   refColumns: string[]
+  onDelete?: ReferentialAction
+  onUpdate?: ReferentialAction
 }
 
 export interface TableDetails {
@@ -102,7 +117,13 @@ export interface TableDetails {
   columns: SchemaColumn[]
   indexes: IndexInfo[]
   foreignKeys: ForeignKeyInfo[]
+  /** Row estimate from metadata. Exact counts are intentionally avoided on large tables. */
   rowCount: number | null
+  rowCountApproximate?: boolean
+  /** Total table/index storage when the server can report it cheaply. */
+  sizeBytes?: number | null
+  /** Real primary-key constraint name, needed because PostgreSQL allows custom names. */
+  primaryKeyName?: string
   ddl: string
 }
 
