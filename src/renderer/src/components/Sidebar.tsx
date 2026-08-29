@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import DropMenu, { type MenuItem } from './DropMenu'
+import SchemaMap from './SchemaMap'
 import type { ConnectionSummary, DbSchema } from '../../../shared/types'
 import {
   IconChevron,
@@ -116,6 +117,7 @@ export default function Sidebar({
   footer
 }: Props): React.JSX.Element {
   const [filter, setFilter] = useState('')
+  const [mapOpen, setMapOpen] = useState(false)
   const [menu, setMenu] = useState<{
     table: DbSchema['tables'][number]
     point: { x: number; y: number }
@@ -128,6 +130,11 @@ export default function Sidebar({
   }, [schema, filter])
 
   const activeState = activeId ? states[activeId] : undefined
+  const activeConnection = connections.find((connection) => connection.id === activeId) ?? null
+
+  useEffect(() => {
+    setMapOpen(false)
+  }, [activeId, schema?.database])
 
   return (
     <aside className="sidebar">
@@ -210,6 +217,15 @@ export default function Sidebar({
             <div className="side-label">
               <span>Tables</span>
               <span className="label-count">{schema.tables.length}</span>
+              {schema.tables.length > 0 && (
+                <button
+                  className="schema-map-trigger"
+                  title="Open interactive schema map"
+                  onClick={() => setMapOpen(true)}
+                >
+                  Map
+                </button>
+              )}
               <button className="icon-btn" title="New table" onClick={onNewTable}>
                 <IconPlus />
               </button>
@@ -285,6 +301,23 @@ export default function Sidebar({
           point={menu.point}
           onClose={() => setMenu(null)}
           items={buildTableMenu(menu.table, onOpenTable, onOpenStructure)}
+        />
+      )}
+
+      {mapOpen && activeId && schema && activeConnection && (
+        <SchemaMap
+          connectionId={activeId}
+          driver={activeConnection.driver}
+          schema={schema}
+          onClose={() => setMapOpen(false)}
+          onOpenTable={(schemaName, table) => {
+            setMapOpen(false)
+            onOpenTable(schemaName, table)
+          }}
+          onOpenStructure={(schemaName, table) => {
+            setMapOpen(false)
+            onOpenStructure(schemaName, table)
+          }}
         />
       )}
     </aside>

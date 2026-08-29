@@ -5,6 +5,7 @@ import * as db from './db'
 import * as ai from './ai'
 import { checkForUpdates, getUpdateState, initUpdater, quitAndInstall } from './updater'
 import { isDestructive, isUnscopedWrite } from './sqlutil'
+import { getSchemaRelationships } from './schemaGraph'
 import { readSshHosts } from './sshconfig'
 import { splitStatements } from '../shared/sqlscan'
 import type {
@@ -116,6 +117,13 @@ function registerHandlers(): void {
   ipcMain.handle('db:schema', async (_e, id: string) => {
     try {
       return { ok: true, schema: await db.getSchema(id) }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('db:relationships', async (_e, id: string) => {
+    try {
+      return { ok: true, relationships: await getSchemaRelationships(id) }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }

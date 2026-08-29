@@ -52,6 +52,10 @@ responsive on a hundred thousand rows. Free, open source, and yours to modify.
 
 **Design your schema**
 - Create tables in a visual builder with live SQL, including foreign keys
+- **Interactive schema map** — explore real foreign-key relationships, search
+  tables and columns, pan/zoom the graph, and jump straight to data or structure
+- Click a relationship to inspect its columns and referential actions, then copy
+  a ready-to-run `JOIN` or export the whole model as Mermaid ERD text
 - **Alter existing tables** — add, rename, retype and drop columns, change the
   primary key, add and drop indexes and foreign keys
 - Every change previewed as exact SQL before it runs
@@ -138,6 +142,7 @@ npm run dist:mac      # or dist:win / dist:linux
 src/
   main/         Node side — drivers, SSH, files, secrets
     db.ts       connections, cancellation, introspection, transactional edits
+    schemaGraph.ts  cross-dialect foreign-key graph introspection
     store.ts    encrypted connections, history, saved queries, settings
     ai.ts       Claude API calls, grounded in your schema
     updater.ts  auto-update lifecycle
