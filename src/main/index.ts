@@ -6,6 +6,7 @@ import * as ai from './ai'
 import { checkForUpdates, getUpdateState, initUpdater, quitAndInstall } from './updater'
 import { isDestructive, isUnscopedWrite } from './sqlutil'
 import { readSshHosts } from './sshconfig'
+import { splitStatements } from '../shared/sqlscan'
 import type {
   AppSettings,
   ChatMessage,
@@ -154,7 +155,7 @@ function registerHandlers(): void {
   ipcMain.handle('safety:check', (_e, id: string, sql: string) => {
     const settings = store.getSettings()
     const cfg = db.getConfig(id)
-    const statements = db.splitStatements(sql)
+    const statements = splitStatements(sql)
     const unscoped = statements.filter((s) => isUnscopedWrite(s))
     const isProd = cfg?.environment === 'production'
     const needsConfirm =
