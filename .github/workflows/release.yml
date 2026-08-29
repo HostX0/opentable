@@ -40,6 +40,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Test
+        run: npm test
+
       # electron-builder only packages — it does not compile. Without this the
       # out/ directory is missing and packaging fails on every platform.
       - name: Build
@@ -98,10 +101,6 @@ jobs:
           printf '%s' "$found" | grep "Developer ID Application" | sed 's/^/  /'
           rm -f cert.p12; security delete-keychain probe.keychain 2>/dev/null || true
 
-      # A step's own `env` is not visible to its `if`, so the presence check
-      # happens inside the script rather than in a condition.
-      # A step's own `env` is not visible to its `if`, so the presence check
-      # happens inside the script rather than in a condition.
       - name: Stage the notarisation key
         if: matrix.os == 'macos-latest'
         env:
