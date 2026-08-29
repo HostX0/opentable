@@ -59,6 +59,45 @@ export interface QueryResult {
   elapsedMs: number
 }
 
+/* ————————————————————— Query Doctor / EXPLAIN ————————————————————— */
+
+export type PlanSeverity = 'info' | 'warning' | 'critical'
+
+export interface PlanFinding {
+  severity: PlanSeverity
+  title: string
+  detail: string
+  /** Optional node id so the UI can highlight the relevant part of the plan. */
+  nodeId?: string
+  /** Concrete next step, kept deterministic and local — no AI required. */
+  suggestion?: string
+}
+
+export interface QueryPlanNode {
+  id: string
+  operation: string
+  relation?: string
+  alias?: string
+  access?: string
+  index?: string
+  estimatedRows?: number
+  estimatedCost?: number
+  filter?: string
+  detail?: string
+  children: QueryPlanNode[]
+}
+
+export interface QueryPlan {
+  driver: Driver
+  /** EXPLAIN only by default: the user's query is planned, not executed. */
+  executed: boolean
+  totalCost?: number
+  estimatedRows?: number
+  root: QueryPlanNode
+  findings: PlanFinding[]
+  raw: string
+}
+
 export interface SchemaColumn {
   name: string
   dataType: string

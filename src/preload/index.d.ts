@@ -11,6 +11,7 @@ import type {
   DbSchema,
   HistoryEntry,
   PendingChange,
+  QueryPlan,
   QueryResult,
   SavedQuery,
   TableDetails
@@ -67,6 +68,12 @@ declare global {
           id: string,
           statements: string[]
         ) => Promise<{ ok: boolean; error?: string; applied: number }>
+      }
+      doctor: {
+        diagnose: (
+          id: string,
+          sql: string
+        ) => Promise<{ ok: boolean; plan?: QueryPlan; error?: string }>
       }
       safety: {
         check: (id: string, sql: string) => Promise<SafetyCheck>

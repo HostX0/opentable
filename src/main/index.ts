@@ -3,6 +3,7 @@ import { join } from 'path'
 import * as store from './store'
 import * as db from './db'
 import * as ai from './ai'
+import { diagnoseQuery } from './queryDoctor'
 import { checkForUpdates, getUpdateState, initUpdater, quitAndInstall } from './updater'
 import { isDestructive, isUnscopedWrite } from './sqlutil'
 import { readSshHosts } from './sshconfig'
@@ -146,10 +147,18 @@ function registerHandlers(): void {
     (_e, id: string, table: { schema: string; name: string }, changes: PendingChange[]) =>
       db.applyChanges(id, table, changes)
   )
-
   ipcMain.handle('db:alterTable', (_e, id: string, statements: string[]) =>
     db.applyAlter(id, statements)
   )
+
+  /* ————— Query Doctor ————— */
+  ipcMain.handle('doctor:diagnose', async (_e, id: string, sql: string) => {
+    try {
+      return { ok: true, plan: await diagnoseQuery(id, sql) }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
 
   /* ————— safety ————— */
   ipcMain.handle('safety:check', (_e, id: string, sql: string) => {
