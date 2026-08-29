@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { AppSettings } from '../../../shared/types'
+import type { AiProvider, AppSettings } from '../../../shared/types'
 import type { UpdateState } from '../../../preload/index.d'
 
 interface Props {
@@ -19,6 +19,9 @@ export default function SettingsModal({ settings, onSave, onClose }: Props): Rea
   const [confirmDestructive, setConfirmDestructive] = useState(settings.confirmDestructive)
   const [aiKey, setAiKey] = useState('')
   const [aiModel, setAiModel] = useState(settings.aiModel)
+  const [aiProvider, setAiProvider] = useState<AiProvider>(settings.aiProvider)
+  const [aiBaseUrl, setAiBaseUrl] = useState(settings.aiBaseUrl)
+  const local = aiProvider === 'openai-compatible'
   const [update, setUpdate] = useState<UpdateState>({ status: 'idle' })
 
   useEffect(() => {
@@ -87,28 +90,71 @@ export default function SettingsModal({ settings, onSave, onClose }: Props): Rea
           <div className="divider" />
 
           <div className="field">
-            <label>Anthropic API key</label>
+            <label>AI provider</label>
+            <select value={aiProvider} onChange={(e) => setAiProvider(e.target.value as AiProvider)}>
+              <option value="anthropic">Anthropic</option>
+              <option value="openai-compatible">OpenAI-compatible</option>
+            </select>
+            <span className="field-note">
+              {local
+                ? 'Ollama and LM Studio locally; vLLM, OpenRouter, Groq or NVIDIA NIM remotely.'
+                : 'Claude models through the Anthropic API.'}
+            </span>
+          </div>
+
+          <div className="field">
+            <label>{local ? 'Server URL' : 'API endpoint'}</label>
+            <input
+              value={aiBaseUrl}
+              onChange={(e) => setAiBaseUrl(e.target.value)}
+              placeholder={local ? 'http://localhost:11434' : 'https://api.anthropic.com'}
+              spellCheck={false}
+            />
+            <span className="field-note">
+              Leave empty for the default. The path is appended for you, so the root is enough.
+            </span>
+          </div>
+
+          <div className="field">
+            <label>{local ? 'API key (optional)' : 'Anthropic API key'}</label>
             <input
               type="password"
               value={aiKey}
               onChange={(e) => setAiKey(e.target.value)}
-              placeholder={settings.hasAiKey ? '••••••••  (saved)' : 'sk-ant-…'}
+              placeholder={
+                settings.hasAiKey
+                  ? '••••••••  (saved)'
+                  : local
+                    ? 'not needed for local models'
+                    : 'sk-ant-…'
+              }
             />
             <span className="field-note">
-              Enables Ask AI, Explain and Fix. Stored encrypted in your OS keychain and sent only to
-              Anthropic.
+              Stored encrypted in your OS keychain, and sent only to the endpoint above.
             </span>
           </div>
 
           <div className="field">
             <label>Model</label>
-            <select value={aiModel} onChange={(e) => setAiModel(e.target.value)}>
-              {MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
+            {local ? (
+              <input
+                value={aiModel}
+                onChange={(e) => setAiModel(e.target.value)}
+                placeholder="llama3.1, qwen2.5-coder, gpt-4o-mini…"
+                spellCheck={false}
+              />
+            ) : (
+              <select value={aiModel} onChange={(e) => setAiModel(e.target.value)}>
+                {MODELS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            <span className="field-note">
+              Your schema is sent to this model as context. A local one keeps it on this machine.
+            </span>
           </div>
 
           <div className="divider" />
@@ -142,6 +188,8 @@ export default function SettingsModal({ settings, onSave, onClose }: Props): Rea
               onSave({
                 defaultRowLimit: rowLimit,
                 confirmDestructive,
+                aiProvider,
+                aiBaseUrl,
                 aiModel,
                 ...(aiKey ? { aiKey } : {})
               })

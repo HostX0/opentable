@@ -2,6 +2,8 @@ import type {
   AiResult,
   AppSettings,
   ApplyResult,
+  ChatMessage,
+  ChatTurn,
   ConnectionConfig,
   ConnectionSummary,
   ConnectResult,
@@ -85,6 +87,13 @@ declare global {
         generate: (id: string, question: string) => Promise<AiResult>
         explain: (id: string, sql: string) => Promise<AiResult>
         fix: (id: string, sql: string, errorText: string) => Promise<AiResult>
+        chat: (id: string, transcript: ChatMessage[]) => Promise<ChatTurn>
+        chatResolve: (
+          id: string,
+          transcript: ChatMessage[],
+          sql: string,
+          approved: boolean
+        ) => Promise<ChatTurn>
       }
       ssh: {
         hosts: () => Promise<

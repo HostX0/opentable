@@ -1,7 +1,21 @@
-import type { AiResult, DbSchema, Driver } from '../shared/types'
-import { getAiKey, getSettings } from './store'
+import type {
+  AiProvider,
+  AiResult,
+  ChatMessage,
+  ChatQuery,
+  ChatTurn,
+  DbSchema,
+  Driver
+} from '../shared/types'
+import { runQuery, splitStatements } from './db'
+import { canAutoRun } from './sqlutil'
+import { getAiConfig } from './store'
 
-const API_URL = 'https://api.anthropic.com/v1/messages'
+const DEFAULT_ENDPOINT: Record<AiProvider, string> = {
+  anthropic: 'https://api.anthropic.com/v1/messages',
+  'openai-compatible': 'http://localhost:11434/v1/chat/completions'
+}
+
 const MAX_TABLES = 60
 
 /** Compact the schema into a prompt-sized DDL sketch the model can reason over. */
@@ -34,43 +48,85 @@ interface AnthropicResponse {
   error?: { message?: string }
 }
 
-async function callClaude(system: string, user: string): Promise<AiResult> {
-  const key = getAiKey()
-  if (!key) {
+interface OpenAiResponse {
+  choices?: { message?: { content?: string } }[]
+  error?: { message?: string }
+}
+
+/**
+ * Normalises a base URL into a full endpoint. People paste the root of their
+ * Ollama or vLLM server far more often than the exact path, so accept both.
+ */
+function endpointFor(provider: AiProvider, baseUrl: string): string {
+  if (!baseUrl) return DEFAULT_ENDPOINT[provider]
+  const trimmed = baseUrl.replace(/\/+$/, '')
+  if (/\/(messages|chat\/completions)$/.test(trimmed)) return trimmed
+  if (provider === 'anthropic') {
+    return /\/v1$/.test(trimmed) ? `${trimmed}/messages` : `${trimmed}/v1/messages`
+  }
+  return /\/v1$/.test(trimmed) ? `${trimmed}/chat/completions` : `${trimmed}/v1/chat/completions`
+}
+
+/**
+ * One call to whichever provider is configured.
+ *
+ * The two wire formats differ in three ways that all have to be handled:
+ * the auth header, where the system prompt lives, and the response shape.
+ */
+async function callModel(system: string, messages: ChatMessage[]): Promise<AiResult> {
+  const { provider, baseUrl, model, key } = getAiConfig()
+
+  // Local servers need no credential, so only Anthropic hard-requires one.
+  if (provider === 'anthropic' && !key) {
     return { ok: false, error: 'Add an Anthropic API key in Settings to use AI features.' }
   }
-  const { aiModel } = getSettings()
+
+  const url = endpointFor(provider, baseUrl)
+  const isAnthropic = provider === 'anthropic'
+
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (isAnthropic) {
+    headers['x-api-key'] = key ?? ''
+    headers['anthropic-version'] = '2023-06-01'
+  } else if (key) {
+    headers.authorization = `Bearer ${key}`
+  }
+
+  const body = isAnthropic
+    ? { model, max_tokens: 1500, system, messages }
+    : { model, max_tokens: 1500, messages: [{ role: 'system', content: system }, ...messages] }
 
   try {
-    const res = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: aiModel,
-        max_tokens: 1500,
-        system,
-        messages: [{ role: 'user', content: user }]
-      })
-    })
+    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
+    const data = (await res.json()) as AnthropicResponse & OpenAiResponse
 
-    const data = (await res.json()) as AnthropicResponse
     if (!res.ok) {
-      return { ok: false, error: data.error?.message ?? `API error ${res.status}` }
+      return { ok: false, error: data.error?.message ?? `API error ${res.status} from ${url}` }
     }
-    const text = (data.content ?? [])
-      .filter((c) => c.type === 'text')
-      .map((c) => c.text ?? '')
-      .join('\n')
-      .trim()
+
+    const text = isAnthropic
+      ? (data.content ?? [])
+          .filter((c) => c.type === 'text')
+          .map((c) => c.text ?? '')
+          .join('\n')
+          .trim()
+      : (data.choices?.[0]?.message?.content ?? '').trim()
+
     if (!text) return { ok: false, error: 'Empty response from the model.' }
     return { ok: true, sql: text }
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    const detail = err instanceof Error ? err.message : String(err)
+    // a refused connection to a local server is the single most likely failure
+    if (/ECONNREFUSED|fetch failed/i.test(detail) && !isAnthropic) {
+      return { ok: false, error: `Could not reach ${url}. Is the server running?` }
+    }
+    return { ok: false, error: detail }
   }
+}
+
+/** Single-turn helper for the existing generate / explain / fix features. */
+async function callClaude(system: string, user: string): Promise<AiResult> {
+  return callModel(system, [{ role: 'user', content: user }])
 }
 
 function stripFences(text: string): { sql: string; explanation?: string } {
@@ -145,4 +201,155 @@ export async function fixSql(
   if (!res.ok || !res.sql) return res
   const { sql: fixed, explanation } = stripFences(res.sql)
   return { ok: true, sql: fixed, explanation }
+}
+
+/* ————————————————————— chat ————————————————————— */
+
+/** Enough hops to look something up, refine it, and answer. */
+const MAX_STEPS = 6
+/** Rows fed back to the model. Large results waste context and prove nothing. */
+const CHAT_ROW_LIMIT = 200
+/** Rows actually shown to the model, of those fetched. */
+const ROWS_IN_PROMPT = 40
+
+function chatSystem(schema: DbSchema, driver: Driver): string {
+  return [
+    `You are a database assistant working against a ${dialectName(driver)} database.`,
+    'You can run queries yourself to answer questions about the real data.',
+    '',
+    'Protocol:',
+    '- To run a query, reply with ONE ```sql fenced block and nothing else.',
+    '  You will get the results back and can then continue.',
+    '- Read-only SELECTs run immediately.',
+    '- Anything that changes data or structure is shown to the user for approval',
+    '  first. Write it when they ask for it — just expect a pause.',
+    '- When you can answer, reply in prose with NO sql block. Be concise and',
+    '  concrete: cite the numbers you actually retrieved.',
+    '- Never invent table or column names. Use only the schema below.',
+    '- If a question cannot be answered from this database, say so plainly.',
+    '',
+    `Schema:\n\n${schemaSketch(schema)}`
+  ].join('\n')
+}
+
+/** Compact rendering of a result set for the model. */
+function renderRows(columns: string[], rows: unknown[][], rowCount: number): string {
+  if (rows.length === 0) return 'No rows.'
+  const shown = rows.slice(0, ROWS_IN_PROMPT)
+  const head = columns.join(' | ')
+  const body = shown
+    .map((r) => r.map((v) => (v === null || v === undefined ? 'NULL' : String(v))).join(' | '))
+    .join('\n')
+  const more = rowCount > shown.length ? `\n… ${rowCount - shown.length} more rows` : ''
+  return `${head}\n${body}${more}`
+}
+
+function extractSql(text: string): string | null {
+  const fence = /```(?:sql)?\s*([\s\S]*?)```/i.exec(text)
+  return fence ? fence[1].trim() : null
+}
+
+async function execute(connectionId: string, sql: string): Promise<ChatQuery> {
+  const statements = splitStatements(sql)
+  const verdict = canAutoRun(statements)
+  const base: ChatQuery = { sql, autoRun: verdict.autoRun, reason: verdict.reason, status: 'ran' }
+  try {
+    const res = await runQuery(connectionId, sql, { rowLimit: CHAT_ROW_LIMIT })
+    const set = res.sets[res.sets.length - 1]
+    return {
+      ...base,
+      status: 'ran',
+      columns: set?.columns ?? [],
+      rows: set?.rows ?? [],
+      rowCount: set?.rowCount ?? 0
+    }
+  } catch (err) {
+    return { ...base, status: 'failed', error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function resultMessage(q: ChatQuery): ChatMessage {
+  if (q.status === 'failed') {
+    return { role: 'user', content: `Query failed: ${q.error}\n\nTry a different approach.` }
+  }
+  if (q.status === 'declined') {
+    return {
+      role: 'user',
+      content: 'The user declined to run that query. Do not retry it; answer without it or ask what they would prefer.'
+    }
+  }
+  return {
+    role: 'user',
+    content: `Result (${q.rowCount ?? 0} rows):\n${renderRows(q.columns ?? [], q.rows ?? [], q.rowCount ?? 0)}`
+  }
+}
+
+/**
+ * Runs the assistant until it answers, needs approval, or hits MAX_STEPS.
+ * Stateless: the whole transcript goes in and comes back out.
+ */
+export async function chat(
+  connectionId: string,
+  transcript: ChatMessage[],
+  schema: DbSchema,
+  driver: Driver
+): Promise<ChatTurn> {
+  const system = chatSystem(schema, driver)
+  const queries: ChatQuery[] = []
+  const convo = [...transcript]
+
+  for (let step = 0; step < MAX_STEPS; step++) {
+    const res = await callModel(system, convo)
+    if (!res.ok) return { reply: '', queries, transcript: convo, error: res.error }
+
+    const text = res.sql ?? ''
+    const sql = extractSql(text)
+
+    if (!sql) {
+      convo.push({ role: 'assistant', content: text })
+      return { reply: text, queries, transcript: convo }
+    }
+
+    convo.push({ role: 'assistant', content: text })
+
+    const verdict = canAutoRun(splitStatements(sql))
+    if (!verdict.autoRun) {
+      const pending: ChatQuery = {
+        sql,
+        autoRun: false,
+        reason: verdict.reason,
+        status: 'awaiting-approval'
+      }
+      return { reply: '', queries, pending, transcript: convo }
+    }
+
+    const done = await execute(connectionId, sql)
+    queries.push(done)
+    convo.push(resultMessage(done))
+  }
+
+  return {
+    reply: '',
+    queries,
+    transcript: convo,
+    error: `Stopped after ${MAX_STEPS} queries without reaching an answer.`
+  }
+}
+
+/** Continues a turn that stopped for approval. */
+export async function resolvePending(
+  connectionId: string,
+  transcript: ChatMessage[],
+  sql: string,
+  approved: boolean,
+  schema: DbSchema,
+  driver: Driver
+): Promise<ChatTurn> {
+  const outcome: ChatQuery = approved
+    ? await execute(connectionId, sql)
+    : { sql, autoRun: false, status: 'declined' }
+
+  const convo = [...transcript, resultMessage(outcome)]
+  const next = await chat(connectionId, convo, schema, driver)
+  return { ...next, queries: [outcome, ...next.queries] }
 }

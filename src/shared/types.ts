@@ -157,12 +157,59 @@ export interface SavedQuery {
 
 /* ————————————————————— settings & AI ————————————————————— */
 
+/**
+ * `anthropic` speaks the Messages API; `openai-compatible` covers everything
+ * that implements /v1/chat/completions — Ollama and LM Studio locally, and
+ * vLLM, OpenRouter, Groq or NVIDIA NIM remotely.
+ */
+export type AiProvider = 'anthropic' | 'openai-compatible'
+
 export interface AppSettings {
   /** Rows fetched before OpenTable adds its own LIMIT guard */
   defaultRowLimit: number
   confirmDestructive: boolean
   hasAiKey: boolean
+  aiProvider: AiProvider
+  /** Empty means the provider's own default endpoint. */
+  aiBaseUrl: string
   aiModel: string
+}
+
+/* ————————————————————— chat ————————————————————— */
+
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+/** A query the assistant ran, or wants to run. */
+export interface ChatQuery {
+  sql: string
+  /** false when it needed approval — writes, or anything not plainly read-only */
+  autoRun: boolean
+  /** why approval was needed, phrased for the prompt */
+  reason?: string
+  status: 'ran' | 'awaiting-approval' | 'declined' | 'failed'
+  columns?: string[]
+  rows?: unknown[][]
+  rowCount?: number
+  error?: string
+}
+
+export interface ChatTurn {
+  /** assistant prose; empty while it is still working through queries */
+  reply: string
+  /** every query this turn touched, in order, for the audit trail */
+  queries: ChatQuery[]
+  /** set when the turn stopped to ask permission */
+  pending?: ChatQuery
+  /**
+   * The conversation including the query exchanges, passed back on the next
+   * call. Keeping it here rather than in the main process means no session
+   * state to leak or expire.
+   */
+  transcript: ChatMessage[]
+  error?: string
 }
 
 export interface AiResult {

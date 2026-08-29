@@ -1,5 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AppSettings, ConnectionConfig, PendingChange, SavedQuery } from '../shared/types'
+import type {
+  AppSettings,
+  ChatMessage,
+  ConnectionConfig,
+  PendingChange,
+  SavedQuery
+} from '../shared/types'
 
 const api = {
   connections: {
@@ -45,7 +51,10 @@ const api = {
     generate: (id: string, question: string) => ipcRenderer.invoke('ai:generate', id, question),
     explain: (id: string, sql: string) => ipcRenderer.invoke('ai:explain', id, sql),
     fix: (id: string, sql: string, errorText: string) =>
-      ipcRenderer.invoke('ai:fix', id, sql, errorText)
+      ipcRenderer.invoke('ai:fix', id, sql, errorText),
+    chat: (id: string, transcript: ChatMessage[]) => ipcRenderer.invoke('ai:chat', id, transcript),
+    chatResolve: (id: string, transcript: ChatMessage[], sql: string, approved: boolean) =>
+      ipcRenderer.invoke('ai:chatResolve', id, transcript, sql, approved)
   },
   ssh: {
     hosts: () => ipcRenderer.invoke('ssh:hosts')

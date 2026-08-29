@@ -56,10 +56,44 @@ responsive on a hundred thousand rows. Free, open source, and yours to modify.
   primary key, add and drop indexes and foreign keys
 - Every change previewed as exact SQL before it runs
 
-**AI** *(optional — bring your own Anthropic key)*
+**AI** *(optional — bring your own key, or run a model locally)*
 - Ask in plain English; the answer is written straight into the editor
 - Explain a query, or fix one that errored
+- **Chat with your database** — a conversation that runs its own read-only
+  queries to answer questions about real data, not just the schema
 - Your schema is sent as context so it uses real column names
+- Works with Anthropic, or any OpenAI-compatible endpoint: **Ollama** and
+  **LM Studio** locally, or vLLM, OpenRouter, Groq and NVIDIA NIM remotely
+
+### Chat, and what it is allowed to do
+
+Chat can run queries itself so it can answer from your data rather than
+guessing. What it may run on its own is decided by an **allowlist**, not a
+blocklist, because the SQL is model-generated:
+
+- A single, plainly read-only `SELECT` runs immediately.
+- **Everything else stops and asks you**, showing the exact SQL first.
+
+"Everything else" is broader than it sounds, and deliberately so. These all
+require your approval even though they look like reads:
+
+| Statement | Why it asks |
+| --- | --- |
+| `WITH x AS (DELETE … RETURNING *) SELECT * FROM x` | a write that starts with `WITH` |
+| `SELECT * INTO new_table FROM t` | creates a table on Postgres |
+| `SELECT … INTO OUTFILE '/tmp/x'` | writes a file on MySQL |
+| `SELECT * FROM t FOR UPDATE` | takes row locks |
+| `SELECT pg_sleep(9999)` | ties up the connection |
+| `SELECT 1; DROP TABLE t` | more than one statement |
+
+Nothing is permanently forbidden — you can approve anything you could have
+typed yourself. Every query it ran stays visible in the conversation, so the
+whole chain is auditable after the fact.
+
+**Where your schema goes.** The prompt includes a sketch of your tables and
+columns. With Anthropic that reaches Anthropic; with a local Ollama or LM
+Studio endpoint it never leaves your machine. That choice is yours in
+Settings, and it is the reason the provider is configurable.
 
 **Safety**
 - Confirmation before `UPDATE`/`DELETE` without a `WHERE`, and before any write

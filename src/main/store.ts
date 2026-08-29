@@ -2,6 +2,7 @@ import { app, safeStorage } from 'electron'
 import { join } from 'path'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
 import type {
+  AiProvider,
   AppSettings,
   ConnectionConfig,
   ConnectionSummary,
@@ -19,12 +20,17 @@ interface StoredSettings {
   defaultRowLimit: number
   confirmDestructive: boolean
   aiKeyEnc?: string
+  aiProvider: AiProvider
+  aiBaseUrl: string
   aiModel: string
 }
 
 const DEFAULT_SETTINGS: StoredSettings = {
   defaultRowLimit: 500,
   confirmDestructive: true,
+  // Anthropic stays the default so existing installs are unaffected
+  aiProvider: 'anthropic',
+  aiBaseUrl: '',
   aiModel: 'claude-sonnet-5'
 }
 
@@ -201,6 +207,8 @@ export function getSettings(): AppSettings {
     defaultRowLimit: s.defaultRowLimit,
     confirmDestructive: s.confirmDestructive,
     hasAiKey: Boolean(s.aiKeyEnc),
+    aiProvider: s.aiProvider,
+    aiBaseUrl: s.aiBaseUrl,
     aiModel: s.aiModel
   }
 }
@@ -211,6 +219,8 @@ export function updateSettings(patch: Partial<AppSettings> & { aiKey?: string })
     ...current,
     defaultRowLimit: patch.defaultRowLimit ?? current.defaultRowLimit,
     confirmDestructive: patch.confirmDestructive ?? current.confirmDestructive,
+    aiProvider: patch.aiProvider ?? current.aiProvider,
+    aiBaseUrl: patch.aiBaseUrl ?? current.aiBaseUrl,
     aiModel: patch.aiModel ?? current.aiModel
   }
   if (patch.aiKey !== undefined) {
@@ -222,4 +232,20 @@ export function updateSettings(patch: Partial<AppSettings> & { aiKey?: string })
 
 export function getAiKey(): string | undefined {
   return decrypt(readSettings().aiKeyEnc)
+}
+
+/** Endpoint, model and key together, so ai.ts has one place to read from. */
+export function getAiConfig(): {
+  provider: AiProvider
+  baseUrl: string
+  model: string
+  key?: string
+} {
+  const s = readSettings()
+  return {
+    provider: s.aiProvider,
+    baseUrl: s.aiBaseUrl.trim(),
+    model: s.aiModel,
+    key: decrypt(s.aiKeyEnc)
+  }
 }

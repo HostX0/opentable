@@ -215,3 +215,9 @@ export const IconLink = ({ className }: IconProps): React.JSX.Element => (
     <path d="M9.4 6.6a2.6 2.6 0 0 0-3.9-.3l-2 2a2.6 2.6 0 0 0 3.7 3.7l1.1-1.1" />
   </svg>
 )
+
+export const IconClose = ({ className }: IconProps): React.JSX.Element => (
+  <svg {...base} className={className} aria-hidden="true">
+    <path d="m4 4 8 8M12 4l-8 8" />
+  </svg>
+)

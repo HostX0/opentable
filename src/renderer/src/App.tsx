@@ -12,6 +12,7 @@ import CreateDatabaseModal from './components/CreateDatabaseModal'
 import ErrorBoundary from './components/ErrorBoundary'
 import DropMenu, { type MenuItem } from './components/DropMenu'
 import AiBar, { type AiAction } from './components/AiBar'
+import ChatPanel from './components/ChatPanel'
 import { IconHistory, IconSettings, IconAi, IconStar } from './components/icons'
 import type {
   AppSettings,
@@ -89,10 +90,13 @@ export default function App(): React.JSX.Element {
     defaultRowLimit: 500,
     confirmDestructive: true,
     hasAiKey: false,
+    aiProvider: 'anthropic',
+    aiBaseUrl: '',
     aiModel: 'claude-sonnet-5'
   })
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [chatOpen, setChatOpen] = useState(false)
   const [aiOpen, setAiOpen] = useState(false)
   const [aiAction, setAiAction] = useState<AiAction>('ask')
   const [history, setHistory] = useState<HistoryEntry[]>([])
@@ -669,6 +673,14 @@ export default function App(): React.JSX.Element {
             </button>
             <button
               className="foot-btn"
+              onClick={() => setChatOpen((v) => !v)}
+              title="Chat with your database"
+            >
+              <IconAi />
+              <span>Chat</span>
+            </button>
+            <button
+              className="foot-btn"
               onClick={() => setSettingsOpen(true)}
               title="Settings"
             >
@@ -904,6 +916,16 @@ export default function App(): React.JSX.Element {
           </div>
         </div>
       </div>
+
+      {chatOpen && (
+        <ChatPanel
+          connectionId={activeId}
+          connectionName={connections.find((c) => c.id === activeId)?.name ?? ''}
+          onClose={() => setChatOpen(false)}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onInsert={useSql}
+        />
+      )}
 
       {modal.open && (
         <ConnectionModal

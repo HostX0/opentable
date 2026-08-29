@@ -6,7 +6,13 @@ import * as ai from './ai'
 import { checkForUpdates, getUpdateState, initUpdater, quitAndInstall } from './updater'
 import { isDestructive, isUnscopedWrite } from './sqlutil'
 import { readSshHosts } from './sshconfig'
-import type { AppSettings, ConnectionConfig, HistoryEntry, PendingChange } from '../shared/types'
+import type {
+  AppSettings,
+  ChatMessage,
+  ConnectionConfig,
+  HistoryEntry,
+  PendingChange
+} from '../shared/types'
 
 function backgroundFor(): string {
   return nativeTheme.shouldUseDarkColors ? '#191919' : '#ffffff'
@@ -185,6 +191,44 @@ function registerHandlers(): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
+  ipcMain.handle('ai:chat', async (_e, id: string, transcript: ChatMessage[]) => {
+    try {
+      const schema = await db.getSchema(id)
+      const cfg = db.getConfig(id)
+      return await ai.chat(id, transcript, schema, cfg?.driver ?? 'postgres')
+    } catch (err) {
+      return {
+        reply: '',
+        queries: [],
+        transcript,
+        error: err instanceof Error ? err.message : String(err)
+      }
+    }
+  })
+  ipcMain.handle(
+    'ai:chatResolve',
+    async (_e, id: string, transcript: ChatMessage[], sql: string, approved: boolean) => {
+      try {
+        const schema = await db.getSchema(id)
+        const cfg = db.getConfig(id)
+        return await ai.resolvePending(
+          id,
+          transcript,
+          sql,
+          approved,
+          schema,
+          cfg?.driver ?? 'postgres'
+        )
+      } catch (err) {
+        return {
+          reply: '',
+          queries: [],
+          transcript,
+          error: err instanceof Error ? err.message : String(err)
+        }
+      }
+    }
+  )
   ipcMain.handle('ai:explain', async (_e, id: string, sql: string) => {
     try {
       const schema = await db.getSchema(id)
