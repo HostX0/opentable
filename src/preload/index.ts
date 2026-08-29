@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppSettings,
   ChatMessage,
+  ChatSession,
   ConnectionConfig,
   PendingChange,
   SavedQuery
@@ -54,7 +55,17 @@ const api = {
       ipcRenderer.invoke('ai:fix', id, sql, errorText),
     chat: (id: string, transcript: ChatMessage[]) => ipcRenderer.invoke('ai:chat', id, transcript),
     chatResolve: (id: string, transcript: ChatMessage[], sql: string, approved: boolean) =>
-      ipcRenderer.invoke('ai:chatResolve', id, transcript, sql, approved)
+      ipcRenderer.invoke('ai:chatResolve', id, transcript, sql, approved),
+    onChatDelta: (cb: (text: string) => void) => {
+      const handler = (_e: unknown, text: string): void => cb(text)
+      ipcRenderer.on('ai:chat-delta', handler)
+      return () => ipcRenderer.removeListener('ai:chat-delta', handler)
+    }
+  },
+  chats: {
+    list: () => ipcRenderer.invoke('chats:list'),
+    save: (session: ChatSession) => ipcRenderer.invoke('chats:save', session),
+    delete: (id: string) => ipcRenderer.invoke('chats:delete', id)
   },
   ssh: {
     hosts: () => ipcRenderer.invoke('ssh:hosts')

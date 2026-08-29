@@ -3,6 +3,7 @@ import type {
   AppSettings,
   ApplyResult,
   ChatMessage,
+  ChatSession,
   ChatTurn,
   ConnectionConfig,
   ConnectionSummary,
@@ -94,6 +95,12 @@ declare global {
           sql: string,
           approved: boolean
         ) => Promise<ChatTurn>
+        onChatDelta: (cb: (text: string) => void) => () => void
+      }
+      chats: {
+        list: () => Promise<ChatSession[]>
+        save: (session: ChatSession) => Promise<ChatSession[]>
+        delete: (id: string) => Promise<ChatSession[]>
       }
       ssh: {
         hosts: () => Promise<

@@ -9,6 +9,7 @@ import { readSshHosts } from './sshconfig'
 import type {
   AppSettings,
   ChatMessage,
+  ChatSession,
   ConnectionConfig,
   HistoryEntry,
   PendingChange
@@ -181,6 +182,11 @@ function registerHandlers(): void {
     store.updateSettings(patch)
   )
 
+  /* ————— chat sessions ————— */
+  ipcMain.handle('chats:list', () => store.listChats())
+  ipcMain.handle('chats:save', (_e, session: ChatSession) => store.saveChat(session))
+  ipcMain.handle('chats:delete', (_e, id: string) => store.deleteChat(id))
+
   /* ————— AI ————— */
   ipcMain.handle('ai:generate', async (_e, id: string, question: string) => {
     try {
@@ -191,11 +197,14 @@ function registerHandlers(): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
-  ipcMain.handle('ai:chat', async (_e, id: string, transcript: ChatMessage[]) => {
+  ipcMain.handle('ai:chat', async (e, id: string, transcript: ChatMessage[]) => {
     try {
       const schema = await db.getSchema(id)
       const cfg = db.getConfig(id)
-      return await ai.chat(id, transcript, schema, cfg?.driver ?? 'postgres')
+      const send = (text: string): void => {
+        if (!e.sender.isDestroyed()) e.sender.send('ai:chat-delta', text)
+      }
+      return await ai.chat(id, transcript, schema, cfg?.driver ?? 'postgres', send)
     } catch (err) {
       return {
         reply: '',
@@ -207,17 +216,21 @@ function registerHandlers(): void {
   })
   ipcMain.handle(
     'ai:chatResolve',
-    async (_e, id: string, transcript: ChatMessage[], sql: string, approved: boolean) => {
+    async (e, id: string, transcript: ChatMessage[], sql: string, approved: boolean) => {
       try {
         const schema = await db.getSchema(id)
         const cfg = db.getConfig(id)
+        const send = (text: string): void => {
+          if (!e.sender.isDestroyed()) e.sender.send('ai:chat-delta', text)
+        }
         return await ai.resolvePending(
           id,
           transcript,
           sql,
           approved,
           schema,
-          cfg?.driver ?? 'postgres'
+          cfg?.driver ?? 'postgres',
+          send
         )
       } catch (err) {
         return {

@@ -196,6 +196,26 @@ export interface ChatQuery {
   error?: string
 }
 
+/** One rendered item in a conversation, as opposed to what the model sees. */
+export type ChatEntry =
+  | { kind: 'you'; text: string }
+  | { kind: 'assistant'; text: string }
+  | { kind: 'query'; query: ChatQuery }
+  | { kind: 'error'; text: string }
+
+export interface ChatSession {
+  id: string
+  title: string
+  /** which connection it was held against, so it can be reopened in context */
+  connectionId: string | null
+  connectionName: string
+  createdAt: number
+  updatedAt: number
+  entries: ChatEntry[]
+  /** the model-facing transcript, including query exchanges */
+  transcript: ChatMessage[]
+}
+
 export interface ChatTurn {
   /** assistant prose; empty while it is still working through queries */
   reply: string

@@ -73,7 +73,63 @@ function endpointFor(provider: AiProvider, baseUrl: string): string {
  * The two wire formats differ in three ways that all have to be handled:
  * the auth header, where the system prompt lives, and the response shape.
  */
-async function callModel(system: string, messages: ChatMessage[]): Promise<AiResult> {
+/** Called with each token as it arrives, when the caller wants streaming. */
+export type Delta = (text: string) => void
+
+/**
+ * Reads a server-sent-event stream, calling `onDelta` per token.
+ *
+ * The two providers frame deltas differently:
+ *   Anthropic  {"type":"content_block_delta","delta":{"text":"…"}}
+ *   OpenAI     {"choices":[{"delta":{"content":"…"}}]}   terminated by [DONE]
+ */
+async function readStream(
+  body: ReadableStream<Uint8Array>,
+  isAnthropic: boolean,
+  onDelta: Delta
+): Promise<string> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffered = ''
+  let full = ''
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffered += decoder.decode(value, { stream: true })
+
+    // SSE frames are separated by a blank line; keep any partial tail
+    const frames = buffered.split('\n\n')
+    buffered = frames.pop() ?? ''
+
+    for (const frame of frames) {
+      for (const line of frame.split('\n')) {
+        if (!line.startsWith('data:')) continue
+        const payload = line.slice(5).trim()
+        if (!payload || payload === '[DONE]') continue
+        try {
+          const json = JSON.parse(payload)
+          const text = isAnthropic
+            ? json?.delta?.text
+            : json?.choices?.[0]?.delta?.content
+          if (typeof text === 'string' && text) {
+            full += text
+            onDelta(text)
+          }
+        } catch {
+          // a frame split across reads; the next chunk completes it
+        }
+      }
+    }
+  }
+  return full
+}
+
+async function callModel(
+  system: string,
+  messages: ChatMessage[],
+  onDelta?: Delta
+): Promise<AiResult> {
   const { provider, baseUrl, model, key } = getAiConfig()
 
   // Local servers need no credential, so only Anthropic hard-requires one.
@@ -92,18 +148,29 @@ async function callModel(system: string, messages: ChatMessage[]): Promise<AiRes
     headers.authorization = `Bearer ${key}`
   }
 
-  const body = isAnthropic
-    ? { model, max_tokens: 1500, system, messages }
-    : { model, max_tokens: 1500, messages: [{ role: 'system', content: system }, ...messages] }
+  const body = {
+    ...(isAnthropic
+      ? { model, max_tokens: 1500, system, messages }
+      : { model, max_tokens: 1500, messages: [{ role: 'system', content: system }, ...messages] }),
+    ...(onDelta ? { stream: true } : {})
+  }
 
   try {
     const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
-    const data = (await res.json()) as AnthropicResponse & OpenAiResponse
 
     if (!res.ok) {
-      return { ok: false, error: data.error?.message ?? `API error ${res.status} from ${url}` }
+      // errors come back as JSON even when streaming was requested
+      const failed = (await res.json().catch(() => ({}))) as AnthropicResponse & OpenAiResponse
+      return { ok: false, error: failed.error?.message ?? `API error ${res.status} from ${url}` }
     }
 
+    if (onDelta && res.body) {
+      const streamed = (await readStream(res.body, isAnthropic, onDelta)).trim()
+      if (!streamed) return { ok: false, error: 'Empty response from the model.' }
+      return { ok: true, sql: streamed }
+    }
+
+    const data = (await res.json()) as AnthropicResponse & OpenAiResponse
     const text = isAnthropic
       ? (data.content ?? [])
           .filter((c) => c.type === 'text')
@@ -292,14 +359,15 @@ export async function chat(
   connectionId: string,
   transcript: ChatMessage[],
   schema: DbSchema,
-  driver: Driver
+  driver: Driver,
+  onDelta?: Delta
 ): Promise<ChatTurn> {
   const system = chatSystem(schema, driver)
   const queries: ChatQuery[] = []
   const convo = [...transcript]
 
   for (let step = 0; step < MAX_STEPS; step++) {
-    const res = await callModel(system, convo)
+    const res = await callModel(system, convo, onDelta)
     if (!res.ok) return { reply: '', queries, transcript: convo, error: res.error }
 
     const text = res.sql ?? ''
@@ -343,13 +411,14 @@ export async function resolvePending(
   sql: string,
   approved: boolean,
   schema: DbSchema,
-  driver: Driver
+  driver: Driver,
+  onDelta?: Delta
 ): Promise<ChatTurn> {
   const outcome: ChatQuery = approved
     ? await execute(connectionId, sql)
     : { sql, autoRun: false, status: 'declined' }
 
   const convo = [...transcript, resultMessage(outcome)]
-  const next = await chat(connectionId, convo, schema, driver)
+  const next = await chat(connectionId, convo, schema, driver, onDelta)
   return { ...next, queries: [outcome, ...next.queries] }
 }

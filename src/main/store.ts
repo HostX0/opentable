@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
 import type {
   AiProvider,
   AppSettings,
+  ChatSession,
   ConnectionConfig,
   ConnectionSummary,
   HistoryEntry,
@@ -193,6 +194,33 @@ export function deleteSaved(id: string): SavedQuery[] {
     readJson<SavedQuery[]>('saved.json', []).filter((x) => x.id !== id)
   )
   return listSaved()
+}
+
+/* ————————————————————— chat sessions ————————————————————— */
+
+/** Conversations are capped so the file cannot grow without bound. */
+const CHAT_CAP = 100
+
+export function listChats(): ChatSession[] {
+  return readJson<ChatSession[]>('chats.json', []).sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
+export function saveChat(session: ChatSession): ChatSession[] {
+  const all = readJson<ChatSession[]>('chats.json', [])
+  const idx = all.findIndex((c) => c.id === session.id)
+  if (idx >= 0) all[idx] = session
+  else all.push(session)
+  const trimmed = all.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, CHAT_CAP)
+  writeJson('chats.json', trimmed)
+  return listChats()
+}
+
+export function deleteChat(id: string): ChatSession[] {
+  writeJson(
+    'chats.json',
+    readJson<ChatSession[]>('chats.json', []).filter((c) => c.id !== id)
+  )
+  return listChats()
 }
 
 /* ————————————————————— settings ————————————————————— */

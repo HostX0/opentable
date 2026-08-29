@@ -221,3 +221,21 @@ export const IconClose = ({ className }: IconProps): React.JSX.Element => (
     <path d="m4 4 8 8M12 4l-8 8" />
   </svg>
 )
+
+export const IconExpand = ({ className }: IconProps): React.JSX.Element => (
+  <svg {...base} className={className} aria-hidden="true">
+    <path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9 7M2.5 13.5 7 9" />
+  </svg>
+)
+
+export const IconCollapse = ({ className }: IconProps): React.JSX.Element => (
+  <svg {...base} className={className} aria-hidden="true">
+    <path d="M13 3.5h-4v-4M3 12.5h4v4M9 7l4.5-4.5M7 9l-4.5 4.5" />
+  </svg>
+)
+
+export const IconSend = ({ className }: IconProps): React.JSX.Element => (
+  <svg {...base} className={className} aria-hidden="true">
+    <path d="M2.5 8h10M8.5 3.5 13 8l-4.5 4.5" />
+  </svg>
+)

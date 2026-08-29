@@ -6,7 +6,7 @@
  * production bundle entirely — an earlier version of this lived in main.tsx
  * and shipped to users, which is what this arrangement exists to prevent.
  */
-import type { ChatMessage, ChatTurn } from '../../shared/types'
+import type { ChatMessage, ChatSession, ChatTurn } from '../../shared/types'
 
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
@@ -69,9 +69,16 @@ async function fakeChat(_id: string, transcript: ChatMessage[]): Promise<ChatTur
     }
   }
 
+  // emit the answer token by token so the preview shows the real streaming UI
+  const answer =
+    'There are 5,000 customers. 1,667 are active, 1,667 inactive, and 1,666 have no status set.'
+  for (const word of answer.split(' ')) {
+    devDelta?.(word + ' ')
+    await wait(35)
+  }
+
   return {
-    reply:
-      'There are 5,000 customers. 1,667 are active, 1,667 inactive, and 1,666 have no status set.',
+    reply: answer,
     queries: [
       {
         sql: 'SELECT status, count(*) FROM customers GROUP BY status',
@@ -89,6 +96,10 @@ async function fakeChat(_id: string, transcript: ChatMessage[]): Promise<ChatTur
     transcript: [...transcript, { role: 'assistant', content: 'answered' }]
   }
 }
+
+/** Session store for the preview, in memory only. */
+let devChats: ChatSession[] = []
+let devDelta: ((text: string) => void) | null = null
 
 export function installDevMock(): void {
   window.opentable = {
@@ -175,6 +186,10 @@ export function installDevMock(): void {
       },
       fix: async () => notAvailable,
       chat: fakeChat,
+      onChatDelta: (cb: (text: string) => void) => {
+        devDelta = cb
+        return () => { devDelta = null }
+      },
       chatResolve: async (_id: string, transcript: ChatMessage[], sql: string, approved: boolean) => {
         await wait(600)
         return {
@@ -186,6 +201,19 @@ export function installDevMock(): void {
           ],
           transcript
         }
+      }
+    },
+    chats: {
+      list: async () => devChats,
+      save: async (session: ChatSession) => {
+        const i = devChats.findIndex((c) => c.id === session.id)
+        if (i >= 0) devChats[i] = session
+        else devChats.unshift(session)
+        return [...devChats].sort((a, b) => b.updatedAt - a.updatedAt)
+      },
+      delete: async (id: string) => {
+        devChats = devChats.filter((c) => c.id !== id)
+        return devChats
       }
     },
     ssh: {
