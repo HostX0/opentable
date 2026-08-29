@@ -13,6 +13,7 @@ import ErrorBoundary from './components/ErrorBoundary'
 import DropMenu, { type MenuItem } from './components/DropMenu'
 import AiBar, { type AiAction } from './components/AiBar'
 import ChatPanel from './components/ChatPanel'
+import QueryDoctor from './components/QueryDoctor'
 import { IconHistory, IconSettings, IconAi, IconStar } from './components/icons'
 import type {
   AppSettings,
@@ -78,8 +79,6 @@ export default function App(): React.JSX.Element {
   const [schemaErrors, setSchemaErrors] = useState<Record<string, string | null>>({})
   const [databases, setDatabases] = useState<Record<string, string[]>>({})
   const [serverVersion, setServerVersion] = useState('')
-  // lazy initialiser: a bare [newTab()] would build a throwaway tab on every
-  // render and inflate the "Query N" counter
   const [tabs, setTabs] = useState<Tab[]>(() => [newTab('Query 1')])
   const [activeTabId, setActiveTabId] = useState('')
   const [modal, setModal] = useState<{ open: boolean; editing: ConnectionSummary | null }>({
@@ -99,6 +98,7 @@ export default function App(): React.JSX.Element {
   const [chatOpen, setChatOpen] = useState(false)
   const [aiOpen, setAiOpen] = useState(false)
   const [aiAction, setAiAction] = useState<AiAction>('ask')
+  const [doctorSql, setDoctorSql] = useState<string | null>(null)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [saved, setSaved] = useState<SavedQuery[]>([])
   const [confirm, setConfirm] = useState<{ check: SafetyCheck; sql: string; tabId: string } | null>(
@@ -147,7 +147,6 @@ export default function App(): React.JSX.Element {
     if (!activeTabId && tabs.length) setActiveTabId(tabs[0].id)
   }, [activeTabId, tabs])
 
-  // keep the selected tab visible when the strip overflows
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
   }, [activeTabId])
@@ -268,13 +267,21 @@ export default function App(): React.JSX.Element {
     [activeId, states, setTab, execute]
   )
 
-  /** Run selection, else the statement under the caret, else the whole doc. */
   const runActive = useCallback(() => {
     const t = tabs.find((x) => x.id === activeTabId)
     if (!t || t.running || t.kind !== 'query') return
     const target = editorRef.current?.getRunTarget()?.trim()
     runSql(t.id, target || t.sql)
   }, [tabs, activeTabId, runSql])
+
+  const openDoctor = useCallback(() => {
+    if (!activeId || states[activeId] !== 'connected') return
+    const t = tabs.find((x) => x.id === activeTabId)
+    if (!t || t.kind !== 'query') return
+    const target = editorRef.current?.getRunTarget()?.trim()
+    const sql = (target || t.sql).trim()
+    if (sql) setDoctorSql(sql)
+  }, [activeId, states, tabs, activeTabId])
 
   const cancelActive = useCallback(async () => {
     if (!activeId) return
@@ -299,10 +306,6 @@ export default function App(): React.JSX.Element {
     }
   }, [tabs, activeTabId, activeId, setTab])
 
-  /**
-   * Runs a CREATE statement, then refreshes so the new object appears. The DDL
-   * is also shown to the user before they commit to it.
-   */
   const runDdl = useCallback(
     async (ddl: string, opts: { switchToDatabase?: string } = {}): Promise<boolean> => {
       if (!activeId) return false
@@ -323,7 +326,6 @@ export default function App(): React.JSX.Element {
     [activeId, refreshSchema, switchDatabase]
   )
 
-  /** Applies an ALTER plan, then reloads the structure tab it came from. */
   const applyAlter = useCallback(
     async (statements: string[], tabId: string): Promise<void> => {
       if (!activeId) return
@@ -423,7 +425,6 @@ export default function App(): React.JSX.Element {
     })
   }, [])
 
-  /** Close a set of tabs, then move focus to the nearest surviving neighbour. */
   const closeTabs = useCallback(
     (ids: Set<string>) => {
       setTabs((prev) => {
@@ -511,7 +512,10 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const mod = isMac ? e.metaKey : e.ctrlKey
-      if (mod && e.key.toLowerCase() === 'k') {
+      if (mod && e.shiftKey && e.key.toLowerCase() === 'd') {
+        e.preventDefault()
+        openDoctor()
+      } else if (mod && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         setPaletteOpen((o) => !o)
       } else if (mod && e.key.toLowerCase() === 't') {
@@ -536,7 +540,7 @@ export default function App(): React.JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [isMac, addTab, closeTab, activeTabId, saveCurrentQuery, cancelActive, activeTab])
+  }, [isMac, addTab, closeTab, activeTabId, saveCurrentQuery, cancelActive, activeTab, openDoctor])
 
   /* ————————————————— resizer ————————————————— */
 
@@ -572,6 +576,13 @@ export default function App(): React.JSX.Element {
         label: 'New query tab',
         hint: isMac ? '⌘T' : 'Ctrl T',
         run: addTab
+      },
+      {
+        id: 'act:doctor',
+        group: 'Actions',
+        label: 'Analyze query with Query Doctor',
+        hint: isMac ? '⌘⇧D' : 'Ctrl Shift D',
+        run: openDoctor
       },
       {
         id: 'act:ai',
@@ -638,7 +649,7 @@ export default function App(): React.JSX.Element {
         run: () => activeId && refreshSchema(activeId)
       }
     ],
-    [isMac, addTab, saveCurrentQuery, activeId, refreshSchema]
+    [isMac, addTab, openDoctor, saveCurrentQuery, activeId, refreshSchema, openNewTable]
   )
 
   const rowsShown = activeTab?.result?.sets.reduce((n, s) => n + s.rows.length, 0) ?? 0
@@ -705,7 +716,6 @@ export default function App(): React.JSX.Element {
                 onClick={() => setActiveTabId(t.id)}
                 onDoubleClick={() => t.kind === 'query' && setRenamingId(t.id)}
                 onAuxClick={(e) => {
-                  // middle-click closes, as in every tabbed editor
                   if (e.button === 1) {
                     e.preventDefault()
                     closeTab(t.id)
@@ -756,135 +766,143 @@ export default function App(): React.JSX.Element {
 
         <div className="workspace">
           <ErrorBoundary resetKey={activeTab?.id}>
-          {activeTab?.kind === 'newtable' ? (
-            <CreateTableView
-              driver={activeConn?.driver ?? 'postgres'}
-              schemaName={schema?.tables[0]?.schema ?? 'public'}
-              tables={schema?.tables ?? []}
-              draft={activeTab.draft ?? newTableDraft(activeConn?.driver ?? 'postgres')}
-              busy={createBusy}
-              error={createError}
-              onChange={(draft) => setTab(activeTab.id, { draft })}
-              onCancel={() => closeTab(activeTab.id)}
-              onCreate={async (ddl, tableName) => {
-                const ok = await runDdl(ddl)
-                if (ok) {
-                  closeTab(activeTab.id)
-                  openTable(schema?.tables[0]?.schema ?? 'public', tableName)
-                }
-              }}
-            />
-          ) : activeTab?.kind === 'structure' ? (
-            activeTab.details ? (
-              <StructureView
-                details={activeTab.details}
+            {activeTab?.kind === 'newtable' ? (
+              <CreateTableView
                 driver={activeConn?.driver ?? 'postgres'}
+                schemaName={schema?.tables[0]?.schema ?? 'public'}
                 tables={schema?.tables ?? []}
+                draft={activeTab.draft ?? newTableDraft(activeConn?.driver ?? 'postgres')}
                 busy={createBusy}
                 error={createError}
-                onQuery={useSql}
-                onApply={(statements, destructive, summary) => {
-                  setCreateError(null)
-                  if (destructive) {
-                    setAlterConfirm({ statements, summary, tabId: activeTab.id })
-                  } else {
-                    applyAlter(statements, activeTab.id)
+                onChange={(draft) => setTab(activeTab.id, { draft })}
+                onCancel={() => closeTab(activeTab.id)}
+                onCreate={async (ddl, tableName) => {
+                  const ok = await runDdl(ddl)
+                  if (ok) {
+                    closeTab(activeTab.id)
+                    openTable(schema?.tables[0]?.schema ?? 'public', tableName)
                   }
                 }}
               />
-            ) : (
-              <div className="results">
-                {activeTab.error ? (
-                  <div className="error-block">{activeTab.error}</div>
-                ) : (
-                  <div className="running-ind">
-                    <span>
-                      Loading structure<span className="ellipsis" />
-                    </span>
-                  </div>
-                )}
-              </div>
-            )
-          ) : (
-            <>
-              {aiOpen && (
-                <AiBar
-                  key={aiAction}
-                  connectionId={activeId}
-                  hasKey={settings.hasAiKey}
-                  currentSql={activeTab?.sql ?? ''}
-                  action={aiAction}
-                  onInsert={useSql}
-                  onOpenSettings={() => {
-                    setAiOpen(false)
-                    setSettingsOpen(true)
+            ) : activeTab?.kind === 'structure' ? (
+              activeTab.details ? (
+                <StructureView
+                  details={activeTab.details}
+                  driver={activeConn?.driver ?? 'postgres'}
+                  tables={schema?.tables ?? []}
+                  busy={createBusy}
+                  error={createError}
+                  onQuery={useSql}
+                  onApply={(statements, destructive, summary) => {
+                    setCreateError(null)
+                    if (destructive) {
+                      setAlterConfirm({ statements, summary, tabId: activeTab.id })
+                    } else {
+                      applyAlter(statements, activeTab.id)
+                    }
                   }}
-                  onClose={() => setAiOpen(false)}
                 />
-              )}
-
-              <div className="editor-zone" style={{ height: editorHeight }}>
-                {activeTab && (
-                  <SqlEditor
-                    key={activeTab.id}
-                    tabId={activeTab.id}
-                    initialValue={activeTab.sql}
-                    driver={activeConn?.driver ?? 'postgres'}
-                    schema={schema}
-                    handleRef={editorRef}
-                    onChange={(v) => setTab(activeTab.id, { sql: v })}
-                    onRun={runActive}
-                  />
-                )}
-                <div className="run-float">
-                  {settings.hasAiKey && (
-                    <button
-                      className={`btn-icon ${aiOpen ? 'on' : ''}`}
-                      title="Ask AI (⌘I)"
-                      onClick={() => {
-                        setAiAction('ask')
-                        setAiOpen((o) => !o)
-                      }}
-                    >
-                      <IconAi />
-                    </button>
-                  )}
-                  <span className="kbd-hint">{isMac ? '⌘⏎' : 'Ctrl ⏎'}</span>
-                  {activeTab?.running ? (
-                    <button className="btn-run cancel" onClick={cancelActive}>
-                      Cancel
-                    </button>
+              ) : (
+                <div className="results">
+                  {activeTab.error ? (
+                    <div className="error-block">{activeTab.error}</div>
                   ) : (
-                    <button
-                      className="btn-run"
-                      onClick={runActive}
-                      disabled={activeState !== 'connected'}
-                    >
-                      <span className="play">▶</span>
-                      Run
-                    </button>
+                    <div className="running-ind">
+                      <span>
+                        Loading structure<span className="ellipsis" />
+                      </span>
+                    </div>
                   )}
                 </div>
-              </div>
+              )
+            ) : (
+              <>
+                {aiOpen && (
+                  <AiBar
+                    key={aiAction}
+                    connectionId={activeId}
+                    hasKey={settings.hasAiKey}
+                    currentSql={activeTab?.sql ?? ''}
+                    action={aiAction}
+                    onInsert={useSql}
+                    onOpenSettings={() => {
+                      setAiOpen(false)
+                      setSettingsOpen(true)
+                    }}
+                    onClose={() => setAiOpen(false)}
+                  />
+                )}
 
-              <div
-                className={`drag-handle ${dragging ? 'dragging' : ''}`}
-                onMouseDown={() => setDragging(true)}
-              />
+                <div className="editor-zone" style={{ height: editorHeight }}>
+                  {activeTab && (
+                    <SqlEditor
+                      key={activeTab.id}
+                      tabId={activeTab.id}
+                      initialValue={activeTab.sql}
+                      driver={activeConn?.driver ?? 'postgres'}
+                      schema={schema}
+                      handleRef={editorRef}
+                      onChange={(v) => setTab(activeTab.id, { sql: v })}
+                      onRun={runActive}
+                    />
+                  )}
+                  <div className="run-float">
+                    <button
+                      className="btn-icon doctor-trigger"
+                      title={`Query Doctor (${isMac ? '⌘⇧D' : 'Ctrl Shift D'})`}
+                      onClick={openDoctor}
+                      disabled={activeState !== 'connected'}
+                    >
+                      Plan
+                    </button>
+                    {settings.hasAiKey && (
+                      <button
+                        className={`btn-icon ${aiOpen ? 'on' : ''}`}
+                        title="Ask AI (⌘I)"
+                        onClick={() => {
+                          setAiAction('ask')
+                          setAiOpen((o) => !o)
+                        }}
+                      >
+                        <IconAi />
+                      </button>
+                    )}
+                    <span className="kbd-hint">{isMac ? '⌘⏎' : 'Ctrl ⏎'}</span>
+                    {activeTab?.running ? (
+                      <button className="btn-run cancel" onClick={cancelActive}>
+                        Cancel
+                      </button>
+                    ) : (
+                      <button
+                        className="btn-run"
+                        onClick={runActive}
+                        disabled={activeState !== 'connected'}
+                      >
+                        <span className="play">▶</span>
+                        Run
+                      </button>
+                    )}
+                  </div>
+                </div>
 
-              <ResultsView
-                result={activeTab?.result ?? null}
-                error={activeTab?.error ?? null}
-                running={activeTab?.running ?? false}
-                hasConnection={activeState === 'connected'}
-                connectionId={activeId}
-                onRerun={rerunActive}
-                onCancel={cancelActive}
-                onFixWithAi={fixWithAi}
-                aiAvailable={settings.hasAiKey}
-              />
-            </>
-          )}
+                <div
+                  className={`drag-handle ${dragging ? 'dragging' : ''}`}
+                  onMouseDown={() => setDragging(true)}
+                />
+
+                <ResultsView
+                  result={activeTab?.result ?? null}
+                  error={activeTab?.error ?? null}
+                  running={activeTab?.running ?? false}
+                  hasConnection={activeState === 'connected'}
+                  connectionId={activeId}
+                  onRerun={rerunActive}
+                  onCancel={cancelActive}
+                  onFixWithAi={fixWithAi}
+                  aiAvailable={settings.hasAiKey}
+                />
+              </>
+            )}
           </ErrorBoundary>
 
           <div className="statusbar">
@@ -926,6 +944,10 @@ export default function App(): React.JSX.Element {
           onOpenSettings={() => setSettingsOpen(true)}
           onInsert={useSql}
         />
+      )}
+
+      {doctorSql && activeId && (
+        <QueryDoctor connectionId={activeId} sql={doctorSql} onClose={() => setDoctorSql(null)} />
       )}
 
       {modal.open && (
@@ -1063,9 +1085,7 @@ function buildTabMenu(
 
   const items: MenuItem[] = [{ label: 'Close', onSelect: () => actions.close(id) }]
   if (hasOthers) items.push({ label: 'Close others', onSelect: () => actions.closeOthers(id) })
-  if (hasRight) {
-    items.push({ label: 'Close to the right', onSelect: () => actions.closeToRight(id) })
-  }
+  if (hasRight) items.push({ label: 'Close to the right', onSelect: () => actions.closeToRight(id) })
   items.push({ label: 'Close all', onSelect: actions.closeAll })
 
   if (isQuery) {

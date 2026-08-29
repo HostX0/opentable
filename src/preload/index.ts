@@ -31,6 +31,9 @@ const api = {
     alterTable: (id: string, statements: string[]) =>
       ipcRenderer.invoke('db:alterTable', id, statements)
   },
+  doctor: {
+    diagnose: (id: string, sql: string) => ipcRenderer.invoke('doctor:diagnose', id, sql)
+  },
   safety: {
     check: (id: string, sql: string) => ipcRenderer.invoke('safety:check', id, sql)
   },
