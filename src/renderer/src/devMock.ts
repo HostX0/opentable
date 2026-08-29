@@ -70,8 +70,21 @@ async function fakeChat(_id: string, transcript: ChatMessage[]): Promise<ChatTur
   }
 
   // emit the answer token by token so the preview shows the real streaming UI
-  const answer =
-    'There are 5,000 customers. 1,667 are active, 1,667 inactive, and 1,666 have no status set.'
+  const answer = [
+    'This is a multi-purpose application database with several distinct areas:',
+    '',
+    '**Admin Management:**',
+    '- `admin_users` - Admin accounts with authentication (passwords, TOTP 2FA)',
+    '- `admin_roles` - Role-based access control with permissions',
+    '- `admin_audit_log` - Comprehensive audit trail of admin actions',
+    '',
+    '**User & Booking:**',
+    '- `users` - Customer accounts (phone, name, avatar)',
+    '- `orders` - Travel/booking orders with payment info and provider details',
+    '',
+    'The core use case appears to be a **travel booking platform** where customers',
+    'create orders and manage passenger information.'
+  ].join('\n')
   for (const word of answer.split(' ')) {
     devDelta?.(word + ' ')
     await wait(35)

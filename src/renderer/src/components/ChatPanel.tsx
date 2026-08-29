@@ -11,6 +11,7 @@ import {
   IconSend,
   IconTrash
 } from './icons'
+import Markdown from './Markdown'
 
 interface Props {
   connectionId: string | null
@@ -455,7 +456,7 @@ export default function ChatPanel({
               )
             return (
               <div key={i} className={`chat-msg ${e.kind}`}>
-                {e.text}
+                {e.kind === 'assistant' ? <Markdown text={e.text} /> : e.text}
               </div>
             )
           })}
@@ -477,7 +478,9 @@ export default function ChatPanel({
 
           {busy &&
             (streaming ? (
-              <div className="chat-msg assistant streaming">{streaming}</div>
+              <div className="chat-msg assistant streaming">
+                <Markdown text={streaming} />
+              </div>
             ) : (
               <div className="chat-typing">
                 <span />
