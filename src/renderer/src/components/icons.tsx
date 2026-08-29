@@ -230,7 +230,7 @@ export const IconExpand = ({ className }: IconProps): React.JSX.Element => (
 
 export const IconCollapse = ({ className }: IconProps): React.JSX.Element => (
   <svg {...base} className={className} aria-hidden="true">
-    <path d="M13 3.5h-4v-4M3 12.5h4v4M9 7l4.5-4.5M7 9l-4.5 4.5" />
+    <path d="M13.5 6.5h-4v-4M2.5 9.5h4v4M9.5 6.5 13.5 2.5M6.5 9.5 2.5 13.5" />
   </svg>
 )
 
