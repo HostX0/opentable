@@ -56,13 +56,17 @@ async function fakeChat(_id: string, transcript: ChatMessage[]): Promise<ChatTur
   const asksToWrite = /delete|drop|update|insert|remove/.test(last)
 
   if (asksToWrite) {
+    const adding = /insert|add|create/.test(last)
+    const sql = adding
+      ? "INSERT INTO public.users (id, phone, name, created_at, avatar_url)\nVALUES (\n  'user_' || gen_random_uuid()::text,\n  '+1' || LPAD((random() * 9000000000)::bigint::text, 10, '0'),\n  'User ' || FLOOR(random() * 10000)::text,\n  now(),\n  'https://api.dicebear.com/7.x/avataaars/svg?seed=' || gen_random_uuid()::text\n);"
+      : "DELETE FROM customers WHERE status = 'inactive'"
     return {
       reply: '',
       queries: [],
       pending: {
-        sql: "DELETE FROM customers WHERE status = 'inactive'",
+        sql,
         autoRun: false,
-        reason: 'DELETE changes the database',
+        reason: `${adding ? 'INSERT' : 'DELETE'} changes the database`,
         status: 'awaiting-approval'
       },
       transcript: [...transcript, { role: 'assistant', content: 'proposing a write' }]

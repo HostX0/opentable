@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { ChatEntry, ChatMessage, ChatQuery, ChatSession, ChatTurn } from '../../../shared/types'
+import type {
+  ChatEntry,
+  ChatMessage,
+  ChatQuery,
+  ChatSession,
+  ChatTurn,
+  Driver
+} from '../../../shared/types'
 import {
   IconAi,
   IconClose,
@@ -12,10 +19,12 @@ import {
   IconTrash
 } from './icons'
 import Markdown from './Markdown'
+import SqlPreview from './SqlPreview'
 
 interface Props {
   connectionId: string | null
   connectionName: string
+  driver: Driver
   onClose: () => void
   onOpenSettings: () => void
   /** Drops a query into the editor so it can be run and edited normally. */
@@ -71,6 +80,54 @@ function relative(ts: number): string {
   const hrs = Math.round(mins / 60)
   if (hrs < 24) return `${hrs}h ago`
   return `${Math.round(hrs / 24)}d ago`
+}
+
+
+/**
+ * What the statement does, in the user's terms.
+ *
+ * Severity matters: an INSERT adds rows and can be undone by deleting them,
+ * while DROP and TRUNCATE cannot. Painting both in alarm red trains people to
+ * ignore the colour, so only the irreversible ones get it.
+ */
+function describe(sql: string): {
+  verb: string
+  severity: 'destructive' | 'change'
+  summary: string
+} {
+  const text = sql.trim()
+  const verb = (/^\s*([a-z]+)/i.exec(text)?.[1] ?? 'statement').toUpperCase()
+  const target =
+    /\b(?:into|from|update|table|join)\s+([a-z_][\w.$"`]*)/i.exec(text)?.[1]?.replace(/["`]/g, '') ??
+    'the database'
+  const scoped = /\bwhere\b/i.test(text)
+
+  switch (verb) {
+    case 'INSERT':
+      return { verb, severity: 'change', summary: `Adds rows to ${target}` }
+    case 'UPDATE':
+      return {
+        verb,
+        severity: scoped ? 'change' : 'destructive',
+        summary: scoped ? `Changes matching rows in ${target}` : `Changes EVERY row in ${target}`
+      }
+    case 'DELETE':
+      return {
+        verb,
+        severity: 'destructive',
+        summary: scoped ? `Removes matching rows from ${target}` : `Removes EVERY row from ${target}`
+      }
+    case 'DROP':
+      return { verb, severity: 'destructive', summary: `Permanently removes ${target}` }
+    case 'TRUNCATE':
+      return { verb, severity: 'destructive', summary: `Empties ${target} completely` }
+    case 'CREATE':
+      return { verb, severity: 'change', summary: `Creates ${target}` }
+    case 'ALTER':
+      return { verb, severity: 'change', summary: `Changes the structure of ${target}` }
+    default:
+      return { verb, severity: 'change', summary: 'Runs against your database' }
+  }
 }
 
 function rowSummary(q: ChatQuery): string {
@@ -191,6 +248,7 @@ function SessionList({
 export default function ChatPanel({
   connectionId,
   connectionName,
+  driver,
   onClose,
   onOpenSettings,
   onInsert
@@ -461,20 +519,35 @@ export default function ChatPanel({
             )
           })}
 
-          {pending && (
-            <div className="chat-approve">
-              <div className="chat-approve-head">This needs your permission — {pending.reason}</div>
-              <code>{pending.sql}</code>
-              <div className="chat-approve-actions">
-                <button className="btn quiet" onClick={() => void resolve(false)}>
-                  Don&rsquo;t run
-                </button>
-                <button className="btn danger" onClick={() => void resolve(true)}>
-                  Run it
-                </button>
-              </div>
-            </div>
-          )}
+          {pending &&
+            (() => {
+              const { verb, severity, summary } = describe(pending.sql)
+              return (
+                <div className={`chat-approve ${severity}`}>
+                  <div className="chat-approve-head">
+                    <span className="chat-approve-verb">{verb}</span>
+                    <span className="chat-approve-summary">{summary}</span>
+                  </div>
+                  <div className="chat-approve-sql">
+                    <SqlPreview code={pending.sql} driver={driver} showLineNumbers={false} />
+                  </div>
+                  <div className="chat-approve-actions">
+                    <span className="chat-approve-note">
+                      {severity === 'destructive' ? 'This cannot be undone.' : 'Waiting for you.'}
+                    </span>
+                    <button className="btn quiet" onClick={() => void resolve(false)}>
+                      Don&rsquo;t run
+                    </button>
+                    <button
+                      className={`btn ${severity === 'destructive' ? 'danger' : 'primary'}`}
+                      onClick={() => void resolve(true)}
+                    >
+                      Run it
+                    </button>
+                  </div>
+                </div>
+              )
+            })()}
 
           {busy &&
             (streaming ? (

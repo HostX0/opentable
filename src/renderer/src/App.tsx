@@ -921,6 +921,7 @@ export default function App(): React.JSX.Element {
         <ChatPanel
           connectionId={activeId}
           connectionName={connections.find((c) => c.id === activeId)?.name ?? ''}
+          driver={connections.find((c) => c.id === activeId)?.driver ?? 'postgres'}
           onClose={() => setChatOpen(false)}
           onOpenSettings={() => setSettingsOpen(true)}
           onInsert={useSql}
