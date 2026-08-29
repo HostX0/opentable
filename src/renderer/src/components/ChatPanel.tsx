@@ -331,6 +331,7 @@ export default function ChatPanel({
   const startNew = useCallback((): void => {
     setSession(newSession(connectionId, connectionName))
     setPending(null)
+    setStreaming('')
     setDraft('')
     setShowList(false)
     inputRef.current?.focus()
@@ -339,6 +340,7 @@ export default function ChatPanel({
   const openSession = useCallback((s: ChatSession): void => {
     setSession(s)
     setPending(null)
+    setStreaming('')
     setShowList(false)
   }, [])
 
@@ -381,9 +383,13 @@ export default function ChatPanel({
     setSession(withUser)
     setStreaming('')
     setBusy(true)
-    const turn = await window.opentable.ai.chat(connectionId, withUser.transcript)
-    await persist(absorb(withUser, turn))
-    setBusy(false)
+    try {
+      const turn = await window.opentable.ai.chat(connectionId, withUser.transcript)
+      await persist(absorb(withUser, turn))
+    } finally {
+      // an IPC rejection would otherwise leave the panel stuck on "working"
+      setBusy(false)
+    }
   }, [draft, connectionId, busy, pending, session, absorb, persist])
 
   const resolve = useCallback(
@@ -393,14 +399,17 @@ export default function ChatPanel({
       setPending(null)
       setStreaming('')
       setBusy(true)
-      const turn = await window.opentable.ai.chatResolve(
-        connectionId,
-        session.transcript,
-        sql,
-        approved
-      )
-      await persist(absorb(session, turn))
-      setBusy(false)
+      try {
+        const turn = await window.opentable.ai.chatResolve(
+          connectionId,
+          session.transcript,
+          sql,
+          approved
+        )
+        await persist(absorb(session, turn))
+      } finally {
+        setBusy(false)
+      }
     },
     [pending, connectionId, session, absorb, persist]
   )
