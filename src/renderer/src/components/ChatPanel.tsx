@@ -369,7 +369,9 @@ export default function ChatPanel({
 
   const send = useCallback(async (): Promise<void> => {
     const text = draft.trim()
-    if (!text || !connectionId || busy) return
+    // a pending permission prompt has to be answered — sending past it would
+    // discard the request without the user ever deciding
+    if (!text || !connectionId || busy || pending) return
     setDraft('')
     const withUser: ChatSession = {
       ...session,
@@ -382,7 +384,7 @@ export default function ChatPanel({
     const turn = await window.opentable.ai.chat(connectionId, withUser.transcript)
     await persist(absorb(withUser, turn))
     setBusy(false)
-  }, [draft, connectionId, busy, session, absorb, persist])
+  }, [draft, connectionId, busy, pending, session, absorb, persist])
 
   const resolve = useCallback(
     async (approved: boolean): Promise<void> => {
@@ -569,8 +571,14 @@ export default function ChatPanel({
               ref={inputRef}
               rows={1}
               value={draft}
-              placeholder={connectionId ? 'Ask about your data…' : 'Connect to a database first'}
-              disabled={!connectionId || busy}
+              placeholder={
+                !connectionId
+                  ? 'Connect to a database first'
+                  : pending
+                    ? 'Answer the request above to continue'
+                    : 'Ask about your data…'
+              }
+              disabled={!connectionId || busy || Boolean(pending)}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -582,7 +590,7 @@ export default function ChatPanel({
             <button
               className="chat-send"
               title="Send"
-              disabled={!connectionId || busy || !draft.trim()}
+              disabled={!connectionId || busy || Boolean(pending) || !draft.trim()}
               onClick={() => void send()}
             >
               <IconSend />

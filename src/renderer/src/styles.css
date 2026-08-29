@@ -3293,8 +3293,8 @@ body.resizing-col {
   overflow-y: auto;
   background: var(--paper-raised);
   border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.14);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
   z-index: 20;
 }
 
@@ -3310,10 +3310,10 @@ body.resizing-col {
   align-items: center;
   gap: 7px;
   width: 100%;
-  padding: 8px 10px;
+  padding: 7px 10px;
   margin-bottom: 4px;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 6px;
   background: var(--paper);
   color: var(--ink);
   font: inherit;
@@ -3337,7 +3337,7 @@ body.resizing-col {
   flex-direction: column;
   gap: 2px;
   padding: 7px 28px 7px 10px;
-  border-radius: 7px;
+  border-radius: 6px;
   cursor: pointer;
 }
 
@@ -3453,7 +3453,7 @@ body.resizing-col {
 .chat-empty li {
   padding: 8px 11px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 6px;
   background: var(--paper);
   cursor: pointer;
   font-size: 12px;
@@ -3482,7 +3482,7 @@ body.resizing-col {
   background: var(--accent);
   color: var(--on-accent);
   padding: 8px 12px;
-  border-radius: 13px 13px 3px 13px;
+  border-radius: 8px 8px 2px 8px;
 }
 
 .chat-msg.assistant {
@@ -3539,12 +3539,15 @@ body.resizing-col {
   justify-content: space-between;
 }
 
-/* ————— query cards ————— */
+/* ————— query cards —————
+   No frame. A query the assistant ran is a quiet aside, not a panel: the SQL
+   sits on a faint ground and its actions only appear on hover, so a long
+   conversation reads as prose rather than a stack of boxes. */
 
 .chat-query {
-  border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: 6px;
   background: var(--paper);
+  border: 1px solid var(--line);
   overflow: hidden;
 }
 
@@ -3554,22 +3557,22 @@ body.resizing-col {
 
 .chat-query-head code {
   display: block;
-  padding: 10px 12px;
+  padding: 9px 11px;
   font-family: var(--mono);
   font-size: 11.5px;
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  color: var(--ink);
+  color: var(--ink-soft);
 }
 
 .chat-query-foot {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px 6px 12px;
-  border-top: 1px solid var(--line);
+  gap: 10px;
+  padding: 0 11px 8px;
   font-size: 11px;
+  min-height: 20px;
 }
 
 .chat-query-meta {
@@ -3581,6 +3584,17 @@ body.resizing-col {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* actions stay out of the way until the card is pointed at */
+.chat-query-foot .btn-mini {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chat-query:hover .chat-query-foot .btn-mini,
+.chat-query-foot .btn-mini:focus-visible {
+  opacity: 1;
 }
 
 .chat-result {
@@ -3599,9 +3613,13 @@ body.resizing-col {
 .chat-result th,
 .chat-result td {
   text-align: left;
-  padding: 4px 8px;
+  padding: 4px 11px;
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
+}
+
+.chat-result tr:last-child td {
+  border-bottom: none;
 }
 
 .chat-result th {
@@ -3613,15 +3631,15 @@ body.resizing-col {
 }
 
 /* ————— approval —————
-   A decision, not an error. The frame stays neutral for additive statements
-   and only turns red for the irreversible ones, so the colour keeps meaning
-   something. */
+   A decision, not an error. One hairline, no internal dividers, and colour
+   only where it earns its place: the frame stays neutral for additive
+   statements and turns red only for the irreversible ones. */
 
 .chat-approve {
   border: 1px solid var(--line-strong);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--paper);
-  overflow: hidden;
+  padding: 12px;
 }
 
 .chat-approve.destructive {
@@ -3632,8 +3650,8 @@ body.resizing-col {
 .chat-approve-head {
   display: flex;
   align-items: baseline;
-  gap: 9px;
-  padding: 11px 13px 10px;
+  gap: 8px;
+  margin-bottom: 9px;
 }
 
 .chat-approve-verb {
@@ -3641,15 +3659,11 @@ body.resizing-col {
   font-family: var(--mono);
   font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: var(--accent-soft);
-  color: var(--ink-soft);
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
 }
 
 .chat-approve.destructive .chat-approve-verb {
-  background: var(--danger-soft);
   color: var(--danger);
 }
 
@@ -3660,27 +3674,25 @@ body.resizing-col {
 }
 
 .chat-approve-sql {
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
+  border-radius: 6px;
   background: var(--paper-sunken);
-  max-height: 260px;
+  max-height: 240px;
   overflow: auto;
 }
 
-/* the shared preview sets its own padding; trim it for this narrow card */
 .chat-approve-sql .cm-editor {
   background: transparent;
 }
 
 .chat-approve-sql .cm-content {
-  padding: 10px 12px;
+  padding: 9px 11px;
 }
 
 .chat-approve-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 10px;
+  margin-top: 10px;
 }
 
 .chat-approve-note {
@@ -3710,10 +3722,10 @@ body.resizing-col {
   position: relative;
   display: flex;
   align-items: flex-end;
-  border: 1px solid var(--line-strong);
-  border-radius: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
   background: var(--paper);
-  padding: 8px 44px 8px 12px;
+  padding: 8px 42px 8px 11px;
   transition: border-color 0.12s ease;
 }
 
