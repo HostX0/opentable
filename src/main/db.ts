@@ -16,11 +16,16 @@ import type {
   IndexInfo,
   PendingChange,
   QueryResult,
+  ReferentialAction,
   ResultSet,
+  SchemaColumn,
   SchemaTable,
   TableDetails
 } from '../shared/types'
+import { mainStatementWord, scanSqlWords, splitStatements } from '../shared/sqlscan'
 import { placeholder, quoteIdent, quoteLiteral, type BuiltStatement } from './sqlutil'
+
+export { splitStatements } from '../shared/sqlscan'
 
 interface Tunnel {
   ssh: SshClient
@@ -125,7 +130,6 @@ function loadPrivateKey(explicitPath?: string, passphrase?: string): KeyMaterial
     if (/passphrase|encrypted/i.test(message)) {
       return { source: path, needsPassphrase: true }
     }
-    // an explicitly chosen key that will not parse is worth reporting
     if (explicitPath) return { source: path, needsPassphrase: false, parseError: message }
   }
 
@@ -168,7 +172,6 @@ async function openTunnel(cfg: ConnectionConfig): Promise<Tunnel> {
   const ssh = cfg.ssh!
   const sshPort = ssh.port || 22
 
-  // Fail fast, and precisely, when the target is not an SSH server.
   const banner = await probeBanner(ssh.host, sshPort)
   if (banner && !banner.startsWith('SSH-')) {
     const guess = guessProtocol(banner)
@@ -194,9 +197,6 @@ async function openTunnel(cfg: ConnectionConfig): Promise<Tunnel> {
     }
 
     const agentSock = process.env.SSH_AUTH_SOCK
-
-    // Handing ssh2 a key it cannot decrypt makes it throw at parse time, which
-    // would mask the real failure. Only offer a key that actually parsed.
     const usableKey = keyMaterial.key
 
     if (keyMaterial.parseError) {
@@ -269,7 +269,6 @@ async function openTunnel(cfg: ConnectionConfig): Promise<Tunnel> {
           resolve({ ssh: client, server, localPort: port })
         })
       })
-      // some servers only offer keyboard-interactive; answer it with the password
       .on('keyboard-interactive', (_n, _i, _l, _p, finish) => finish([ssh.password ?? '']))
       .on('error', fail)
       .connect({
@@ -279,7 +278,6 @@ async function openTunnel(cfg: ConnectionConfig): Promise<Tunnel> {
         password: mode === 'password' ? ssh.password || undefined : undefined,
         privateKey: usableKey,
         passphrase: ssh.passphrase || undefined,
-        // let the OS agent answer when there is no usable key on disk
         agent: agentSock,
         agentForward: false,
         tryKeyboard: true,
@@ -323,9 +321,6 @@ export async function connect(cfg: ConnectionConfig): Promise<ConnectResult> {
         port,
         user: cfg.user,
         password: cfg.password || undefined,
-        // every Postgres session is bound to one database, but the user should
-        // not have to know that: `postgres` is the maintenance database that
-        // always exists, and they can switch with the picker once connected
         database: cfg.database || 'postgres',
         ssl: cfg.ssl ? { rejectUnauthorized: !cfg.sslInsecure } : undefined,
         connectionTimeoutMillis: 15000
@@ -414,10 +409,6 @@ export function getConfig(id: string): ConnectionConfig | undefined {
 
 // ---------------------------------------------------------------- cancellation
 
-/**
- * Cancels the statement currently running on a connection. Postgres and MySQL
- * both require a *second* connection to signal the first one.
- */
 export async function cancelQuery(id: string): Promise<{ ok: boolean; error?: string }> {
   const a = active.get(id)
   if (!a) return { ok: false, error: 'Not connected' }
@@ -425,7 +416,6 @@ export async function cancelQuery(id: string): Promise<{ ok: boolean; error?: st
 
   try {
     if (a.driver === 'sqlite') {
-      // node:sqlite is synchronous; nothing to interrupt from here
       return { ok: false, error: 'SQLite queries cannot be cancelled' }
     }
 
@@ -501,71 +491,47 @@ function mysqlToSet(rows: unknown, fields: mysql.FieldPacket[] | undefined): Res
   return { columns: [], rows: [], rowCount: header?.affectedRows ?? 0, command: 'OK' }
 }
 
-/** Split a script into statements, ignoring semicolons inside strings/comments. */
-export function splitStatements(sql: string): string[] {
-  const out: string[] = []
-  let cur = ''
-  let i = 0
-  let quote: string | null = null
-  while (i < sql.length) {
-    const ch = sql[i]
-    const next = sql[i + 1]
-    if (quote) {
-      cur += ch
-      if (ch === '\\' && quote !== '`') {
-        cur += next ?? ''
-        i += 2
-        continue
-      }
-      if (ch === quote) quote = null
-      i++
-      continue
-    }
-    if (ch === "'" || ch === '"' || ch === '`') {
-      quote = ch
-      cur += ch
-      i++
-      continue
-    }
-    if (ch === '-' && next === '-') {
-      while (i < sql.length && sql[i] !== '\n') cur += sql[i++]
-      continue
-    }
-    if (ch === '/' && next === '*') {
-      while (i < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) cur += sql[i++]
-      cur += '*/'
-      i += 2
-      continue
-    }
-    if (ch === ';') {
-      if (cur.trim()) out.push(cur.trim())
-      cur = ''
-      i++
-      continue
-    }
-    cur += ch
-    i++
-  }
-  if (cur.trim()) out.push(cur.trim())
-  return out
-}
-
 function isSelectLike(sql: string): boolean {
   return /^\s*(select|with|show|describe|desc|explain|pragma|table|values)\b/i.test(sql)
 }
 
-function hasLimit(sql: string): boolean {
-  return /\blimit\s+\d/i.test(sql) || /\bfetch\s+first\b/i.test(sql)
+/** Only a LIMIT/FETCH at the outer statement depth counts as a user supplied guard. */
+function hasTopLevelLimit(sql: string): boolean {
+  const main = mainStatementWord(sql)
+  if (!main || main.value !== 'select') return false
+  return scanSqlWords(sql).some(
+    (word) =>
+      word.depth === main.depth &&
+      word.start > main.end &&
+      (word.value === 'limit' || word.value === 'fetch')
+  )
 }
 
-/** Adds a safety LIMIT to bare SELECTs so a huge table cannot lock up the UI. */
+/**
+ * Adds a LIMIT to a plain outer SELECT without corrupting OFFSET/FETCH/FOR UPDATE
+ * clause order. Nested subquery limits do not disable the guard.
+ */
 function applyRowLimit(sql: string, limit: number): { sql: string; guarded: boolean } {
-  if (limit <= 0) return { sql, guarded: false }
   const trimmed = sql.trim().replace(/;\s*$/, '')
-  if (!/^\s*(select|with)\b/i.test(trimmed) || hasLimit(trimmed)) {
+  if (limit <= 0) return { sql: trimmed, guarded: false }
+  const main = mainStatementWord(trimmed)
+  if (!main || main.value !== 'select' || hasTopLevelLimit(trimmed)) {
     return { sql: trimmed, guarded: false }
   }
-  return { sql: `${trimmed}\nLIMIT ${limit}`, guarded: true }
+
+  const boundary = scanSqlWords(trimmed)
+    .filter(
+      (word) =>
+        word.depth === main.depth &&
+        word.start > main.end &&
+        (word.value === 'offset' || word.value === 'fetch' || word.value === 'for')
+    )
+    .sort((a, b) => a.start - b.start)[0]
+
+  if (!boundary) return { sql: `${trimmed}\nLIMIT ${limit}`, guarded: true }
+  const before = trimmed.slice(0, boundary.start).trimEnd()
+  const after = trimmed.slice(boundary.start).trimStart()
+  return { sql: `${before}\nLIMIT ${limit}\n${after}`, guarded: true }
 }
 
 /** Detect a single-table SELECT so the grid can offer inline editing. */
@@ -668,7 +634,6 @@ export async function runQuery(
       }
     }
 
-    // annotate the first result set with edit metadata when it is a simple SELECT
     if (sets.length === 1 && sets[0].columns.length && statements.length === 1) {
       try {
         const src = await detectSource(id, statements[0])
@@ -703,127 +668,196 @@ function readSqliteColumns(lite: DatabaseSync, sql: string): string[] {
 
 // ---------------------------------------------------------------- schema
 
+function schemaKey(schema: string, table: string): string {
+  return `${schema}\u0000${table}`
+}
+
+function pushColumn(map: Map<string, SchemaColumn[]>, key: string, column: SchemaColumn): void {
+  const list = map.get(key) ?? []
+  list.push(column)
+  map.set(key, list)
+}
+
+function mysqlColumnType(row: {
+  ct: string
+  ex: string
+  gen: string | null
+}): string {
+  let type = row.ct || 'text'
+  if (/auto_increment/i.test(row.ex) && !/auto_increment/i.test(type)) type += ' AUTO_INCREMENT'
+  if (row.gen) {
+    type += ` GENERATED ALWAYS AS (${row.gen}) ${/stored/i.test(row.ex) ? 'STORED' : 'VIRTUAL'}`
+  }
+  return type
+}
+
+function mysqlDefaultSql(value: unknown, type: string, extra: string): string | null {
+  if (value === null || value === undefined) return null
+  const raw = String(value)
+  if (/^(tinyint|smallint|mediumint|int|integer|bigint|decimal|numeric|float|double|real|bit|year)\b/i.test(type)) {
+    return raw
+  }
+  if (/^(CURRENT_TIMESTAMP(?:\(\d+\))?|CURRENT_DATE|CURRENT_TIME|LOCALTIME(?:\(\d+\))?|LOCALTIMESTAMP(?:\(\d+\))?|NULL)$/i.test(raw)) {
+    return raw
+  }
+  if (/DEFAULT_GENERATED/i.test(extra) && /^\(.+\)$/s.test(raw)) return raw
+  return quoteLiteral(raw)
+}
+
 export async function getSchema(id: string): Promise<DbSchema> {
   const a = active.get(id)
   if (!a) throw new Error('Not connected')
 
   if (a.driver === 'sqlite') {
     const lite = a.lite!
-    const tables = lite
+    const rows = lite
       .prepare(
-        `select name, type from sqlite_master
-          where type in ('table','view') and name not like 'sqlite_%'
-          order by name`
+        `select m.name as table_name, m.type as table_type,
+                p.cid as cid, p.name as column_name, p.type as data_type,
+                p."notnull" as not_null, p.dflt_value as default_value, p.pk as pk
+           from sqlite_schema m
+           left join pragma_table_info(m.name) p
+          where m.type in ('table','view') and m.name not like 'sqlite_%'
+          order by m.name, p.cid`
       )
-      .all() as { name: string; type: string }[]
+      .all() as {
+      table_name: string
+      table_type: string
+      cid: number | null
+      column_name: string | null
+      data_type: string | null
+      not_null: number | null
+      default_value: string | null
+      pk: number | null
+    }[]
+
+    const tableMap = new Map<string, SchemaTable>()
+    for (const r of rows) {
+      let table = tableMap.get(r.table_name)
+      if (!table) {
+        table = {
+          schema: 'main',
+          name: r.table_name,
+          kind: r.table_type === 'view' ? 'view' : 'table',
+          columns: []
+        }
+        tableMap.set(r.table_name, table)
+      }
+      if (r.column_name) {
+        table.columns.push({
+          name: r.column_name,
+          dataType: r.data_type || 'BLOB',
+          nullable: r.not_null === 0,
+          isPrimary: Number(r.pk ?? 0) > 0,
+          defaultValue: r.default_value
+        })
+      }
+    }
     return {
       database: a.config.filePath?.split('/').pop() ?? 'sqlite',
-      tables: tables.map((t) => {
-        const cols = lite.prepare(`pragma table_info(${quoteIdent(t.name, 'sqlite')})`).all() as {
-          name: string
-          type: string
-          notnull: number
-          pk: number
-          dflt_value: string | null
-        }[]
-        return {
-          schema: 'main',
-          name: t.name,
-          kind: t.type === 'view' ? ('view' as const) : ('table' as const),
-          columns: cols.map((c) => ({
-            name: c.name,
-            dataType: c.type || 'blob',
-            nullable: c.notnull === 0,
-            isPrimary: c.pk > 0,
-            defaultValue: c.dflt_value
-          }))
-        }
-      })
+      tables: [...tableMap.values()]
     }
   }
 
   if (a.driver === 'postgres') {
-    const dbRes = await a.pg!.query('select current_database() as db')
+    const [dbRes, tablesRes, colsRes] = await Promise.all([
+      a.pg!.query('select current_database() as db'),
+      a.pg!.query(
+        `select table_schema, table_name, table_type
+           from information_schema.tables
+          where table_schema not in ('pg_catalog','information_schema')
+          order by table_schema, table_name`
+      ),
+      a.pg!.query(
+        `select ic.table_schema, ic.table_name, ic.column_name,
+                pg_catalog.format_type(att.atttypid, att.atttypmod) as data_type,
+                ic.is_nullable, ic.column_default,
+                exists (
+                  select 1
+                    from pg_index pix
+                   where pix.indrelid = cls.oid
+                     and pix.indisprimary
+                     and att.attnum = any(pix.indkey)
+                ) as is_primary
+           from information_schema.columns ic
+           join pg_namespace ns on ns.nspname = ic.table_schema
+           join pg_class cls on cls.relnamespace = ns.oid and cls.relname = ic.table_name
+           join pg_attribute att
+             on att.attrelid = cls.oid
+            and att.attname = ic.column_name
+            and att.attnum > 0
+            and not att.attisdropped
+          where ic.table_schema not in ('pg_catalog','information_schema')
+          order by ic.table_schema, ic.table_name, ic.ordinal_position`
+      )
+    ])
     const database = String(dbRes.rows[0]?.db ?? '')
-    const tablesRes = await a.pg!.query(
-      `select table_schema, table_name, table_type
-         from information_schema.tables
-        where table_schema not in ('pg_catalog','information_schema')
-        order by table_schema, table_name`
-    )
-    const colsRes = await a.pg!.query(
-      `select table_schema, table_name, column_name, data_type, is_nullable, column_default
-         from information_schema.columns
-        where table_schema not in ('pg_catalog','information_schema')
-        order by table_schema, table_name, ordinal_position`
-    )
-    const pkRes = await a.pg!.query(
-      `select kcu.table_schema, kcu.table_name, kcu.column_name
-         from information_schema.table_constraints tc
-         join information_schema.key_column_usage kcu
-           on tc.constraint_name = kcu.constraint_name
-          and tc.table_schema = kcu.table_schema
-        where tc.constraint_type = 'PRIMARY KEY'`
-    )
-    const pk = new Set(pkRes.rows.map((r) => `${r.table_schema}.${r.table_name}.${r.column_name}`))
+    const grouped = new Map<string, SchemaColumn[]>()
+    for (const c of colsRes.rows) {
+      pushColumn(grouped, schemaKey(c.table_schema, c.table_name), {
+        name: c.column_name,
+        dataType: String(c.data_type ?? 'text'),
+        nullable: c.is_nullable === 'YES',
+        isPrimary: Boolean(c.is_primary),
+        defaultValue: c.column_default
+      })
+    }
     const tables: SchemaTable[] = tablesRes.rows.map((t) => ({
       schema: t.table_schema,
       name: t.table_name,
       kind: t.table_type === 'VIEW' ? 'view' : 'table',
-      columns: colsRes.rows
-        .filter((c) => c.table_schema === t.table_schema && c.table_name === t.table_name)
-        .map((c) => ({
-          name: c.column_name,
-          dataType: c.data_type,
-          nullable: c.is_nullable === 'YES',
-          isPrimary: pk.has(`${c.table_schema}.${c.table_name}.${c.column_name}`),
-          defaultValue: c.column_default
-        }))
+      columns: grouped.get(schemaKey(t.table_schema, t.table_name)) ?? []
     }))
     return { database, tables }
   }
 
-  const [dbRows] = await a.my!.query('select database() as db')
+  const [[dbRows], [tRows], [cRows]] = await Promise.all([
+    a.my!.query('select database() as db'),
+    a.my!.query(
+      `select table_schema as ts, table_name as tn, table_type as tt
+         from information_schema.tables
+        where table_schema = database()
+        order by table_name`
+    ),
+    a.my!.query(
+      `select table_schema as ts, table_name as tn, column_name as cn,
+              column_type as ct, is_nullable as nl, column_key as ck,
+              column_default as cd, extra as ex, generation_expression as gen
+         from information_schema.columns
+        where table_schema = database()
+        order by table_name, ordinal_position`
+    )
+  ])
   const database = String((dbRows as { db: string | null }[])[0]?.db ?? '')
-  const [tRows] = await a.my!.query(
-    `select table_schema as ts, table_name as tn, table_type as tt
-       from information_schema.tables
-      where table_schema = database()
-      order by table_name`
-  )
-  const [cRows] = await a.my!.query(
-    `select table_schema as ts, table_name as tn, column_name as cn,
-            data_type as dt, is_nullable as nl, column_key as ck, column_default as cd
-       from information_schema.columns
-      where table_schema = database()
-      order by table_name, ordinal_position`
-  )
-  const cols = cRows as {
+  const grouped = new Map<string, SchemaColumn[]>()
+  for (const c of cRows as {
     ts: string
     tn: string
     cn: string
-    dt: string
+    ct: string
     nl: string
     ck: string
-    cd: string | null
-  }[]
+    cd: unknown
+    ex: string
+    gen: string | null
+  }[]) {
+    const type = mysqlColumnType(c)
+    pushColumn(grouped, schemaKey(c.ts, c.tn), {
+      name: c.cn,
+      dataType: type,
+      nullable: c.nl === 'YES',
+      isPrimary: c.ck === 'PRI',
+      defaultValue: mysqlDefaultSql(c.cd, c.ct, c.ex)
+    })
+  }
   const tables: SchemaTable[] = (tRows as { ts: string; tn: string; tt: string }[]).map((t) => ({
     schema: t.ts,
     name: t.tn,
     kind: t.tt === 'VIEW' ? 'view' : 'table',
-    columns: cols
-      .filter((c) => c.tn === t.tn)
-      .map((c) => ({
-        name: c.cn,
-        dataType: c.dt,
-        nullable: c.nl === 'YES',
-        isPrimary: c.ck === 'PRI',
-        defaultValue: c.cd
-      }))
+    columns: grouped.get(schemaKey(t.ts, t.tn)) ?? []
   }))
   return { database, tables }
 }
-
 
 /** node-postgres does not parse every array type — accept a raw `{a,b}` literal too. */
 function toStringArray(value: unknown): string[] {
@@ -836,6 +870,31 @@ function toStringArray(value: unknown): string[] {
       .filter(Boolean)
   }
   return []
+}
+
+const REFERENTIAL_ACTIONS = new Set<ReferentialAction>([
+  'NO ACTION',
+  'CASCADE',
+  'SET NULL',
+  'RESTRICT',
+  'SET DEFAULT'
+])
+
+function normalizeAction(value: unknown): ReferentialAction | undefined {
+  if (value == null) return undefined
+  const action = String(value).trim().replace(/\s+/g, ' ').toUpperCase() as ReferentialAction
+  return REFERENTIAL_ACTIONS.has(action) ? action : undefined
+}
+
+function postgresAction(value: unknown): ReferentialAction | undefined {
+  const action = ({
+    a: 'NO ACTION',
+    r: 'RESTRICT',
+    c: 'CASCADE',
+    n: 'SET NULL',
+    d: 'SET DEFAULT'
+  } as Record<string, ReferentialAction>)[String(value ?? '')]
+  return action
 }
 
 // ---------------------------------------------------------------- table details
@@ -857,6 +916,9 @@ export async function getTableDetails(
   const foreignKeys: ForeignKeyInfo[] = []
   let ddl = ''
   let rowCount: number | null = null
+  let rowCountApproximate = false
+  let sizeBytes: number | null = null
+  let primaryKeyName: string | undefined
 
   const qualified =
     a.driver === 'mysql' || a.driver === 'sqlite'
@@ -873,134 +935,264 @@ export async function getTableDetails(
       }[]
       for (const ix of idx) {
         const cols = lite.prepare(`pragma index_info(${quoteIdent(ix.name, 'sqlite')})`).all() as {
-          name: string
+          name: string | null
         }[]
+        const def = lite
+          .prepare(`select sql from sqlite_schema where type = 'index' and name = ?`)
+          .get(ix.name) as { sql?: string | null } | undefined
         indexes.push({
           name: ix.name,
-          columns: cols.map((c) => c.name),
+          columns: cols.map((c) => c.name).filter((c): c is string => Boolean(c)),
           unique: ix.unique === 1,
-          primary: ix.origin === 'pk'
+          primary: ix.origin === 'pk',
+          origin: ix.origin,
+          definition: def?.sql ?? undefined
         })
       }
-      const fks = lite.prepare(`pragma foreign_key_list(${quoteIdent(table, 'sqlite')})`).all() as {
+      primaryKeyName = indexes.find((ix) => ix.primary)?.name
+
+      const fkRows = lite.prepare(`pragma foreign_key_list(${quoteIdent(table, 'sqlite')})`).all() as {
         id: number
+        seq: number
         table: string
         from: string
         to: string
+        on_update: string
+        on_delete: string
       }[]
-      for (const fk of fks) {
-        foreignKeys.push({
+      const fkGroups = new Map<number, ForeignKeyInfo & { seqs: number[] }>()
+      for (const fk of fkRows) {
+        const group = fkGroups.get(fk.id) ?? {
           name: `fk_${fk.id}`,
-          columns: [fk.from],
+          columns: [],
           refSchema: 'main',
           refTable: fk.table,
-          refColumns: [fk.to]
-        })
+          refColumns: [],
+          onUpdate: normalizeAction(fk.on_update),
+          onDelete: normalizeAction(fk.on_delete),
+          seqs: []
+        }
+        group.columns.push(fk.from)
+        group.refColumns.push(fk.to)
+        group.seqs.push(fk.seq)
+        fkGroups.set(fk.id, group)
       }
+      for (const group of fkGroups.values()) {
+        const zipped = group.columns.map((column, i) => ({
+          column,
+          ref: group.refColumns[i],
+          seq: group.seqs[i]
+        }))
+        zipped.sort((x, y) => x.seq - y.seq)
+        const { seqs: _seqs, ...info } = group
+        info.columns = zipped.map((x) => x.column)
+        info.refColumns = zipped.map((x) => x.ref)
+        foreignKeys.push(info)
+      }
+
       const row = lite
-        .prepare(`select sql from sqlite_master where name = ?`)
+        .prepare(`select sql from sqlite_schema where type in ('table','view') and name = ?`)
         .get(table) as { sql?: string } | undefined
       ddl = row?.sql ?? ''
-      const cnt = lite.prepare(`select count(*) as c from ${qualified}`).get() as { c: number }
-      rowCount = Number(cnt.c)
+
+      // sqlite_stat1 is populated by ANALYZE. When present it gives a cheap row
+      // estimate; when absent we show no count rather than freezing on COUNT(*).
+      const statTable = lite
+        .prepare(`select 1 as ok from sqlite_schema where type = 'table' and name = 'sqlite_stat1'`)
+        .get() as { ok?: number } | undefined
+      if (statTable) {
+        const stats = lite.prepare(`select stat from sqlite_stat1 where tbl = ?`).all(table) as {
+          stat: string
+        }[]
+        const estimates = stats
+          .map((s) => Number(/^\s*(\d+)/.exec(s.stat)?.[1] ?? NaN))
+          .filter(Number.isFinite)
+        if (estimates.length) {
+          rowCount = Math.max(...estimates)
+          rowCountApproximate = true
+        }
+      }
     } else if (a.driver === 'postgres') {
-      // pg_get_indexdef(oid, colno, pretty) resolves each key position, including
-      // expression indexes where there is no plain column to join to.
-      const idx = await a.pg!.query(
-        `select i.relname as name, ix.indisunique as uniq, ix.indisprimary as prim,
-                array(
-                  select pg_get_indexdef(ix.indexrelid, k + 1, true)
-                    from generate_subscripts(ix.indkey, 1) as k
-                   order by k
-                ) as cols
-           from pg_index ix
-           join pg_class i on i.oid = ix.indexrelid
-           join pg_class t on t.oid = ix.indrelid
-           join pg_namespace n on n.oid = t.relnamespace
-          where t.relname = $1 and n.nspname = $2
-          order by ix.indisprimary desc, i.relname`,
-        [table, hit.schema]
-      )
+      const [idx, fk, meta] = await Promise.all([
+        a.pg!.query(
+          `select i.relname as name, ix.indisunique as uniq, ix.indisprimary as prim,
+                  pg_get_indexdef(ix.indexrelid) as definition,
+                  array(
+                    select pg_get_indexdef(ix.indexrelid, k + 1, true)
+                      from generate_subscripts(ix.indkey, 1) as k
+                     order by k
+                  ) as cols
+             from pg_index ix
+             join pg_class i on i.oid = ix.indexrelid
+             join pg_class t on t.oid = ix.indrelid
+             join pg_namespace n on n.oid = t.relnamespace
+            where t.relname = $1 and n.nspname = $2
+            order by ix.indisprimary desc, i.relname`,
+          [table, hit.schema]
+        ),
+        a.pg!.query(
+          `select con.conname as name,
+                  nf.nspname as ref_schema, cf.relname as ref_table,
+                  con.confupdtype::text as update_rule,
+                  con.confdeltype::text as delete_rule,
+                  (select array_agg(att.attname::text order by u.ord)
+                     from unnest(con.conkey) with ordinality as u(attnum, ord)
+                     join pg_attribute att
+                       on att.attrelid = con.conrelid and att.attnum = u.attnum) as cols,
+                  (select array_agg(att.attname::text order by u.ord)
+                     from unnest(con.confkey) with ordinality as u(attnum, ord)
+                     join pg_attribute att
+                       on att.attrelid = con.confrelid and att.attnum = u.attnum) as ref_cols
+             from pg_constraint con
+             join pg_class c on c.oid = con.conrelid
+             join pg_namespace n on n.oid = c.relnamespace
+             join pg_class cf on cf.oid = con.confrelid
+             join pg_namespace nf on nf.oid = cf.relnamespace
+            where con.contype = 'f' and c.relname = $1 and n.nspname = $2
+            order by con.conname`,
+          [table, hit.schema]
+        ),
+        a.pg!.query(
+          `select case when c.reltuples < 0 then null else c.reltuples::bigint end as estimated_rows,
+                  pg_total_relation_size(c.oid)::bigint as size_bytes,
+                  (select pc.conname
+                     from pg_constraint pc
+                    where pc.conrelid = c.oid and pc.contype = 'p'
+                    limit 1) as primary_key_name
+             from pg_class c
+             join pg_namespace n on n.oid = c.relnamespace
+            where c.relname = $1 and n.nspname = $2
+            limit 1`,
+          [table, hit.schema]
+        )
+      ])
+
       for (const r of idx.rows) {
         indexes.push({
           name: String(r.name),
-          // array_agg can yield nulls for expression indexes — never hand the UI a null
           columns: toStringArray(r.cols),
           unique: Boolean(r.uniq),
-          primary: Boolean(r.prim)
+          primary: Boolean(r.prim),
+          definition: r.definition ? String(r.definition) : undefined
         })
       }
-      // conkey/confkey are smallint[] so they unnest cleanly; resolve each side separately
-      const fk = await a.pg!.query(
-        `select con.conname as name,
-                nf.nspname as ref_schema, cf.relname as ref_table,
-                (select array_agg(att.attname::text order by u.ord)
-                   from unnest(con.conkey) with ordinality as u(attnum, ord)
-                   join pg_attribute att
-                     on att.attrelid = con.conrelid and att.attnum = u.attnum) as cols,
-                (select array_agg(att.attname::text order by u.ord)
-                   from unnest(con.confkey) with ordinality as u(attnum, ord)
-                   join pg_attribute att
-                     on att.attrelid = con.confrelid and att.attnum = u.attnum) as ref_cols
-           from pg_constraint con
-           join pg_class c on c.oid = con.conrelid
-           join pg_namespace n on n.oid = c.relnamespace
-           join pg_class cf on cf.oid = con.confrelid
-           join pg_namespace nf on nf.oid = cf.relnamespace
-          where con.contype = 'f' and c.relname = $1 and n.nspname = $2
-          order by con.conname`,
-        [table, hit.schema]
-      )
       for (const r of fk.rows) {
         foreignKeys.push({
           name: String(r.name),
           columns: toStringArray(r.cols),
           refSchema: String(r.ref_schema ?? ''),
           refTable: String(r.ref_table ?? ''),
-          refColumns: toStringArray(r.ref_cols)
+          refColumns: toStringArray(r.ref_cols),
+          onUpdate: postgresAction(r.update_rule),
+          onDelete: postgresAction(r.delete_rule)
         })
       }
-      const cnt = await a.pg!.query(`select count(*)::int as c from ${qualified}`)
-      rowCount = cnt.rows[0]?.c ?? null
+      const m = meta.rows[0]
+      if (m?.estimated_rows != null) {
+        rowCount = Number(m.estimated_rows)
+        rowCountApproximate = true
+      }
+      if (m?.size_bytes != null) sizeBytes = Number(m.size_bytes)
+      primaryKeyName = m?.primary_key_name ? String(m.primary_key_name) : undefined
       ddl = buildDdlFromColumns(hit, 'postgres')
     } else {
-      const [idx] = await a.my!.query(`show index from ${qualified}`)
-      const grouped = new Map<string, { cols: string[]; unique: boolean }>()
-      for (const r of idx as { Key_name: string; Column_name: string; Non_unique: number }[]) {
+      const [idxRows, fkRows, createdRows, metaRows] = await Promise.all([
+        a.my!.query(`show index from ${qualified}`),
+        a.my!.query(
+          `select k.constraint_name as name, k.column_name as col,
+                  k.referenced_table_schema as rs, k.referenced_table_name as rt,
+                  k.referenced_column_name as rc, k.ordinal_position as ord,
+                  r.update_rule as update_rule, r.delete_rule as delete_rule
+             from information_schema.key_column_usage k
+             left join information_schema.referential_constraints r
+               on r.constraint_schema = k.constraint_schema
+              and r.constraint_name = k.constraint_name
+              and r.table_name = k.table_name
+            where k.table_schema = database() and k.table_name = ?
+              and k.referenced_table_name is not null
+            order by k.constraint_name, k.ordinal_position`,
+          [table]
+        ),
+        a.my!.query(`show create table ${qualified}`),
+        a.my!.query(
+          `select table_rows as estimated_rows,
+                  coalesce(data_length, 0) + coalesce(index_length, 0) as size_bytes
+             from information_schema.tables
+            where table_schema = database() and table_name = ?`,
+          [table]
+        )
+      ])
+
+      const idx = idxRows[0] as {
+        Key_name: string
+        Column_name: string | null
+        Non_unique: number
+        Seq_in_index: number
+      }[]
+      const grouped = new Map<string, { cols: { name: string; seq: number }[]; unique: boolean }>()
+      for (const r of idx) {
         const g = grouped.get(r.Key_name) ?? { cols: [], unique: r.Non_unique === 0 }
-        g.cols.push(r.Column_name)
+        if (r.Column_name) g.cols.push({ name: r.Column_name, seq: Number(r.Seq_in_index) })
         grouped.set(r.Key_name, g)
       }
       for (const [name, g] of grouped) {
-        indexes.push({ name, columns: g.cols, unique: g.unique, primary: name === 'PRIMARY' })
+        g.cols.sort((x, y) => x.seq - y.seq)
+        indexes.push({
+          name,
+          columns: g.cols.map((x) => x.name),
+          unique: g.unique,
+          primary: name === 'PRIMARY'
+        })
       }
-      const [fk] = await a.my!.query(
-        `select constraint_name as name, column_name as col,
-                referenced_table_schema as rs, referenced_table_name as rt,
-                referenced_column_name as rc
-           from information_schema.key_column_usage
-          where table_schema = database() and table_name = ?
-            and referenced_table_name is not null`,
-        [table]
-      )
-      const fkGroups = new Map<string, ForeignKeyInfo>()
-      for (const r of fk as { name: string; col: string; rs: string; rt: string; rc: string }[]) {
+      if (indexes.some((ix) => ix.primary)) primaryKeyName = 'PRIMARY'
+
+      const fkGroups = new Map<string, ForeignKeyInfo & { ordinals: number[] }>()
+      for (const r of fkRows[0] as {
+        name: string
+        col: string
+        rs: string
+        rt: string
+        rc: string
+        ord: number
+        update_rule: string
+        delete_rule: string
+      }[]) {
         const g = fkGroups.get(r.name) ?? {
           name: r.name,
           columns: [],
           refSchema: r.rs,
           refTable: r.rt,
-          refColumns: []
+          refColumns: [],
+          onUpdate: normalizeAction(r.update_rule),
+          onDelete: normalizeAction(r.delete_rule),
+          ordinals: []
         }
         g.columns.push(r.col)
         g.refColumns.push(r.rc)
+        g.ordinals.push(Number(r.ord))
         fkGroups.set(r.name, g)
       }
-      foreignKeys.push(...fkGroups.values())
-      const [created] = await a.my!.query(`show create table ${qualified}`)
-      ddl = (created as Record<string, string>[])[0]?.['Create Table'] ?? ''
-      const [cnt] = await a.my!.query(`select count(*) as c from ${qualified}`)
-      rowCount = Number((cnt as { c: number }[])[0]?.c ?? 0)
+      for (const group of fkGroups.values()) {
+        const zipped = group.columns.map((column, i) => ({
+          column,
+          ref: group.refColumns[i],
+          ordinal: group.ordinals[i]
+        }))
+        zipped.sort((x, y) => x.ordinal - y.ordinal)
+        const { ordinals: _ordinals, ...info } = group
+        info.columns = zipped.map((x) => x.column)
+        info.refColumns = zipped.map((x) => x.ref)
+        foreignKeys.push(info)
+      }
+
+      const created = createdRows[0] as Record<string, string>[]
+      ddl = created[0]?.['Create Table'] ?? ''
+      const meta = (metaRows[0] as { estimated_rows: number | string | null; size_bytes: number | string | null }[])[0]
+      if (meta?.estimated_rows != null) {
+        rowCount = Number(meta.estimated_rows)
+        rowCountApproximate = true
+      }
+      if (meta?.size_bytes != null) sizeBytes = Number(meta.size_bytes)
     }
   } catch {
     /* details are best-effort; return whatever we gathered */
@@ -1016,13 +1208,16 @@ export async function getTableDetails(
     indexes,
     foreignKeys,
     rowCount,
+    rowCountApproximate,
+    sizeBytes,
+    primaryKeyName,
     ddl
   }
 }
 
 function buildDdlFromColumns(t: SchemaTable, driver: 'postgres' | 'mysql' | 'sqlite'): string {
   const lines = t.columns.map((c) => {
-    const bits = [quoteIdent(c.name, driver), c.dataType.toUpperCase()]
+    const bits = [quoteIdent(c.name, driver), c.dataType]
     if (!c.nullable) bits.push('NOT NULL')
     if (c.defaultValue) bits.push(`DEFAULT ${c.defaultValue}`)
     return '  ' + bits.join(' ')
@@ -1034,10 +1229,6 @@ function buildDdlFromColumns(t: SchemaTable, driver: 'postgres' | 'mysql' | 'sql
 
 // ---------------------------------------------------------------- editing
 
-/**
- * Applies grid edits inside a transaction. Every statement targets rows by
- * primary key, and the generated SQL is returned so the UI can show it.
- */
 export async function applyChanges(
   id: string,
   table: { schema: string; name: string },
@@ -1053,7 +1244,6 @@ export async function applyChanges(
       ? `${quoteIdent(table.schema, 'postgres')}.${quoteIdent(table.name, 'postgres')}`
       : quoteIdent(table.name, driver)
 
-  // Values are bound as parameters, never interpolated — only `display` inlines them.
   const built: BuiltStatement[] = []
   for (const ch of changes) {
     const params: unknown[] = []
@@ -1179,11 +1369,6 @@ export async function applyChanges(
   }
 }
 
-/**
- * Applies a set of DDL statements. Postgres runs DDL transactionally so the
- * whole change is all-or-nothing; MySQL commits each statement implicitly, so
- * the first failure stops the run and what already applied is reported.
- */
 export async function applyAlter(
   id: string,
   statements: string[]
@@ -1195,7 +1380,6 @@ export async function applyAlter(
   let applied = 0
   try {
     if (a.driver === 'sqlite') {
-      // the SQLite rebuild carries its own BEGIN/COMMIT and pragmas
       const lite = a.lite!
       const selfManaged = statements.some((s) => /^\s*BEGIN/i.test(s))
       if (!selfManaged) lite.exec('BEGIN')
