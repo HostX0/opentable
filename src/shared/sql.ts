@@ -15,7 +15,7 @@ export function isSafeIdent(name: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)
 }
 
-export type FkAction = 'NO ACTION' | 'CASCADE' | 'SET NULL' | 'RESTRICT'
+export type FkAction = 'NO ACTION' | 'CASCADE' | 'SET NULL' | 'RESTRICT' | 'SET DEFAULT'
 
 export interface ForeignKeyRef {
   table: string
@@ -37,7 +37,13 @@ export interface ColumnDef {
   references?: ForeignKeyRef
 }
 
-export const FK_ACTIONS: FkAction[] = ['NO ACTION', 'CASCADE', 'SET NULL', 'RESTRICT']
+export const FK_ACTIONS: FkAction[] = [
+  'NO ACTION',
+  'CASCADE',
+  'SET NULL',
+  'RESTRICT',
+  'SET DEFAULT'
+]
 
 /** Column types offered by the table builder, per dialect. */
 export const COLUMN_TYPES: Record<Driver, string[]> = {
@@ -112,12 +118,15 @@ export function buildCreateTable(
     constraints.primaryKey ?? usable.filter((c) => c.primaryKey).map((c) => c.name.trim())
   // a single-column SQLite key must be inline to drive rowid auto-increment
   const inlineSqlitePk = driver === 'sqlite' && pks.length === 1
+  const inlineSqlitePkName = inlineSqlitePk ? pks[0] : null
 
   const lines = usable.map((c) => {
-    const bits = [quoteIdent(c.name.trim(), driver), c.type]
-    if (inlineSqlitePk && c.primaryKey) bits.push('PRIMARY KEY')
-    if (!c.nullable && !(inlineSqlitePk && c.primaryKey)) bits.push('NOT NULL')
-    if (c.unique && !c.primaryKey) bits.push('UNIQUE')
+    const name = c.name.trim()
+    const isInlinePk = inlineSqlitePkName === name
+    const bits = [quoteIdent(name, driver), c.type]
+    if (isInlinePk) bits.push('PRIMARY KEY')
+    if (!c.nullable && !isInlinePk) bits.push('NOT NULL')
+    if (c.unique && !c.primaryKey && !isInlinePk) bits.push('UNIQUE')
     if (c.defaultValue.trim()) bits.push(`DEFAULT ${c.defaultValue.trim()}`)
     return '  ' + bits.join(' ')
   })
@@ -128,7 +137,10 @@ export function buildCreateTable(
 
   for (const u of constraints.uniques ?? []) {
     if (u.columns.length === 0) continue
-    lines.push(`  UNIQUE (${u.columns.map((c) => quoteIdent(c, driver)).join(', ')})`)
+    const prefix = u.name?.trim() ? `CONSTRAINT ${quoteIdent(u.name.trim(), driver)} ` : ''
+    lines.push(
+      `  ${prefix}UNIQUE (${u.columns.map((c) => quoteIdent(c, driver)).join(', ')})`
+    )
   }
 
   // Table-level FOREIGN KEY rather than an inline REFERENCES: MySQL parses the
@@ -148,7 +160,8 @@ export function buildCreateTable(
 
   for (const fk of fkSpecs) {
     if (!fk.refTable || fk.columns.length === 0 || fk.refColumns.length === 0) continue
-    lines.push('  ' + foreignKeyClause(fk, driver))
+    const prefix = fk.name?.trim() ? `CONSTRAINT ${quoteIdent(fk.name.trim(), driver)} ` : ''
+    lines.push('  ' + prefix + foreignKeyClause(fk, driver))
   }
 
   return `CREATE TABLE ${qualified} (\n${lines.join(',\n')}\n);`

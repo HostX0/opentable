@@ -1,4 +1,4 @@
-import type { SchemaTable } from '../../../shared/types'
+import type { Driver, SchemaTable } from '../../../shared/types'
 import { FK_ACTIONS } from '../../../shared/sql'
 import type { EditableForeignKey, EditableIndex } from '../../../shared/alter'
 import { IconPlus, IconTrash, IconUndo } from './icons'
@@ -111,11 +111,13 @@ export function IndexEditor({
 /* ————————————————————————— foreign keys ————————————————————————— */
 
 export function ForeignKeyEditor({
+  driver,
   columnNames,
   tables,
   foreignKeys,
   onChange
 }: {
+  driver: Driver
   columnNames: string[]
   tables: SchemaTable[]
   foreignKeys: EditableForeignKey[]
@@ -123,6 +125,7 @@ export function ForeignKeyEditor({
 }): React.JSX.Element {
   const patch = (id: string, next: Partial<EditableForeignKey>): void =>
     onChange(foreignKeys.map((f) => (f.id === id ? { ...f, ...next } : f)))
+  const actions = driver === 'mysql' ? FK_ACTIONS.filter((a) => a !== 'SET DEFAULT') : FK_ACTIONS
 
   return (
     <div className="constraint-editor">
@@ -168,7 +171,19 @@ export function ForeignKeyEditor({
               disabled={locked}
               onChange={(e) => patch(fk.id, { onDelete: e.target.value as never })}
             >
-              {FK_ACTIONS.map((a) => (
+              {actions.map((a) => (
+                <option key={a} value={a}>
+                  {a.toLowerCase()}
+                </option>
+              ))}
+            </select>
+            <span className="fk-label">on update</span>
+            <select
+              value={fk.onUpdate}
+              disabled={locked}
+              onChange={(e) => patch(fk.id, { onUpdate: e.target.value as never })}
+            >
+              {actions.map((a) => (
                 <option key={a} value={a}>
                   {a.toLowerCase()}
                 </option>

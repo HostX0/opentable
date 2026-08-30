@@ -9,9 +9,7 @@ import {
   type ForeignKeySpec
 } from './sql'
 
-/** A column in the editor, carrying where it came from so renames are detectable. */
 export interface EditableColumn extends ColumnDef {
-  /** name in the database; absent means this column is new */
   originalName?: string
 }
 
@@ -28,19 +26,20 @@ export type AlterKind =
   | 'drop-foreign-key'
   | 'rebuild'
 
-/** An index as edited in the UI. */
 export interface EditableIndex {
   id: string
   name: string
   columns: string[]
   unique: boolean
   primary: boolean
-  /** present when it already exists in the database */
   originalName?: string
+  /** SQLite pragma index_list origin: c=create index, u=unique constraint, pk=primary key. */
+  origin?: string
+  /** Raw CREATE INDEX SQL when the server exposes it. */
+  definition?: string
   dropped?: boolean
 }
 
-/** A foreign key as edited in the UI. */
 export interface EditableForeignKey extends ForeignKeySpec {
   id: string
   originalName?: string
@@ -50,7 +49,6 @@ export interface EditableForeignKey extends ForeignKeySpec {
 export interface AlterStatement {
   sql: string
   kind: AlterKind
-  /** may destroy or truncate existing data */
   destructive: boolean
   description: string
 }
@@ -58,7 +56,6 @@ export interface AlterStatement {
 export interface AlterPlan {
   statements: AlterStatement[]
   warnings: string[]
-  /** SQLite could not express a change directly and the table is rebuilt */
   rebuild: boolean
 }
 
@@ -75,7 +72,6 @@ export function toEditable(columns: SchemaColumn[]): EditableColumn[] {
   }))
 }
 
-/** Full column definition, used where a dialect wants the whole thing restated. */
 function columnSpec(c: EditableColumn): string {
   const bits = [c.type]
   if (!c.nullable) bits.push('NOT NULL')
@@ -91,39 +87,196 @@ function changed(before: EditableColumn, after: EditableColumn): boolean {
   )
 }
 
+function quoteWithStyle(name: string, quote: '"' | '`' | '['): string {
+  if (quote === '[') return '[' + name.replace(/]/g, ']]') + ']'
+  return quote + name.replace(new RegExp(quote, 'g'), quote + quote) + quote
+}
+
+function quotedTokenEnd(sql: string, start: number, quote: '"' | '`' | '['): number {
+  const close = quote === '[' ? ']' : quote
+  let i = start + 1
+  while (i < sql.length) {
+    if (sql[i] === close) {
+      if (sql[i + 1] === close) {
+        i += 2
+        continue
+      }
+      return i + 1
+    }
+    i++
+  }
+  return sql.length
+}
+
+function stringEnd(sql: string, start: number): number {
+  let i = start + 1
+  while (i < sql.length) {
+    if (sql[i] === "'") {
+      if (sql[i + 1] === "'") {
+        i += 2
+        continue
+      }
+      return i + 1
+    }
+    i++
+  }
+  return sql.length
+}
+
 /**
- * SQLite cannot change a column's type, nullability or default in place, so the
- * table is rebuilt: new table, copy the rows across, swap the names. Wrapped in
- * a transaction with foreign keys suspended, which is the documented procedure.
+ * SQLite stores exact CREATE INDEX SQL in sqlite_schema. Keep it exact across a
+ * table rebuild while rewriting only the table token after ON and renamed
+ * column identifiers after that point. Strings and the index name are untouched.
  */
+export function rewriteSqliteIndexDefinition(
+  definition: string,
+  tableName: string,
+  finalName: string,
+  renames: Map<string, string>
+): string {
+  const sql = definition.trim().replace(/;\s*$/, '')
+  let out = ''
+  let i = 0
+  let sawOn = false
+  let tableSeen = false
+
+  const replacementFor = (name: string, isFunction: boolean): string | null => {
+    if (sawOn && !tableSeen && name.toLowerCase() === tableName.toLowerCase()) {
+      tableSeen = true
+      return finalName
+    }
+    if (tableSeen && !isFunction) {
+      for (const [before, after] of renames) {
+        if (name.toLowerCase() === before.toLowerCase()) return after
+      }
+    }
+    return null
+  }
+
+  while (i < sql.length) {
+    const ch = sql[i]
+    if (ch === "'") {
+      const end = stringEnd(sql, i)
+      out += sql.slice(i, end)
+      i = end
+      continue
+    }
+    if (ch === '"' || ch === '`' || ch === '[') {
+      const quote = ch as '"' | '`' | '['
+      const end = quotedTokenEnd(sql, i, quote)
+      const raw = sql.slice(i, end)
+      const value =
+        quote === '['
+          ? raw.slice(1, -1).replace(/]]/g, ']')
+          : raw.slice(1, -1).replace(new RegExp(`${quote}${quote}`, 'g'), quote)
+      let j = end
+      while (/\s/.test(sql[j] ?? '')) j++
+      const replacement = replacementFor(value, tableSeen && sql[j] === '(')
+      out += replacement ? quoteWithStyle(replacement, quote) : raw
+      i = end
+      continue
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      const start = i
+      i++
+      while (i < sql.length && /[A-Za-z0-9_$]/.test(sql[i])) i++
+      const word = sql.slice(start, i)
+      if (!sawOn && word.toLowerCase() === 'on') sawOn = true
+      let j = i
+      while (/\s/.test(sql[j] ?? '')) j++
+      const replacement = replacementFor(word, tableSeen && sql[j] === '(')
+      out += replacement ?? word
+      continue
+    }
+    out += ch
+    i++
+  }
+  return out + ';'
+}
+
+function mappedName(name: string, renames: Map<string, string>): string {
+  for (const [before, after] of renames) {
+    if (name.toLowerCase() === before.toLowerCase()) return after
+  }
+  return name
+}
+
 function sqliteRebuild(
   tableName: string,
   finalName: string,
   columns: EditableColumn[],
-  foreignKeys: EditableForeignKey[] = []
+  foreignKeys: EditableForeignKey[],
+  indexes: EditableIndex[],
+  warnings: string[]
 ): AlterStatement[] {
   const tmp = `${tableName}__opentable_new`
+  const renames = new Map(
+    columns
+      .filter((c) => c.originalName && c.originalName !== c.name.trim())
+      .map((c) => [c.originalName!, c.name.trim()] as const)
+  )
   const pk = columns.filter((c) => c.primaryKey && c.name.trim()).map((c) => c.name.trim())
+
+  const activeFks: ForeignKeySpec[] = foreignKeys
+    .filter((f) => !f.dropped)
+    .map((f) => ({
+      name: f.name,
+      columns: f.columns.map((c) => mappedName(c, renames)),
+      refTable: f.refTable === tableName ? finalName : f.refTable,
+      refColumns:
+        f.refTable === tableName ? f.refColumns.map((c) => mappedName(c, renames)) : f.refColumns,
+      onDelete: f.onDelete,
+      onUpdate: f.onUpdate
+    }))
+
+  const uniqueConstraints = indexes
+    .filter((i) => !i.dropped && !i.primary && i.origin === 'u')
+    .filter((i) => i.columns.length > 0)
+    .map((i) => ({ columns: i.columns.map((c) => mappedName(c, renames)) }))
+
   const createTmp = buildCreateTable('sqlite', 'main', tmp, columns, {
     primaryKey: pk.length ? pk : undefined,
-    foreignKeys: foreignKeys.filter((f) => !f.dropped)
+    foreignKeys: activeFks,
+    uniques: uniqueConstraints
   }).replace(/;$/, '')
 
-  // only columns that already existed can carry data over
   const carried = columns.filter((c) => c.originalName)
   const targetCols = carried.map((c) => quoteIdent(c.name.trim(), 'sqlite')).join(', ')
   const sourceCols = carried.map((c) => quoteIdent(c.originalName!, 'sqlite')).join(', ')
 
-  return [
-    { sql: 'PRAGMA foreign_keys = off;', kind: 'rebuild', destructive: false, description: 'Suspend foreign keys' },
-    { sql: 'BEGIN TRANSACTION;', kind: 'rebuild', destructive: false, description: 'Start transaction' },
-    { sql: `${createTmp};`, kind: 'rebuild', destructive: false, description: 'Create the new table' },
+  const statements: AlterStatement[] = [
     {
+      sql: 'PRAGMA foreign_keys = off;',
+      kind: 'rebuild',
+      destructive: false,
+      description: 'Suspend foreign keys'
+    },
+    {
+      sql: 'BEGIN TRANSACTION;',
+      kind: 'rebuild',
+      destructive: false,
+      description: 'Start transaction'
+    },
+    {
+      sql: `${createTmp};`,
+      kind: 'rebuild',
+      destructive: false,
+      description: 'Create the new table'
+    }
+  ]
+
+  if (carried.length > 0) {
+    statements.push({
       sql: `INSERT INTO ${quoteIdent(tmp, 'sqlite')} (${targetCols}) SELECT ${sourceCols} FROM ${quoteIdent(tableName, 'sqlite')};`,
       kind: 'rebuild',
       destructive: false,
       description: 'Copy the existing rows'
-    },
+    })
+  } else {
+    warnings.push('No existing columns remain, so existing rows cannot be copied into the rebuilt table.')
+  }
+
+  statements.push(
     {
       sql: `DROP TABLE ${quoteIdent(tableName, 'sqlite')};`,
       kind: 'rebuild',
@@ -135,10 +288,43 @@ function sqliteRebuild(
       kind: 'rebuild',
       destructive: false,
       description: 'Put the new table in its place'
-    },
+    }
+  )
+
+  // A table rebuild drops every external index. Recreate every active explicit
+  // index inside the same transaction; unique constraints were rebuilt above.
+  for (const ix of indexes.filter((i) => !i.dropped && !i.primary && i.origin !== 'u')) {
+    if (!ix.name.trim()) continue
+    let sql = ''
+    if (ix.definition?.trim()) {
+      sql = rewriteSqliteIndexDefinition(ix.definition, tableName, finalName, renames)
+    } else if (ix.columns.length > 0 && ix.columns.every(Boolean)) {
+      sql = buildCreateIndex('sqlite', 'main', finalName, {
+        ...ix,
+        columns: ix.columns.map((c) => mappedName(c, renames))
+      })
+    } else {
+      warnings.push(`Index ${ix.name} could not be recreated automatically because its definition is unavailable.`)
+      continue
+    }
+    statements.push({
+      sql,
+      kind: 'add-index',
+      destructive: false,
+      description: `Recreate index ${ix.name}`
+    })
+  }
+
+  statements.push(
     { sql: 'COMMIT;', kind: 'rebuild', destructive: false, description: 'Commit' },
-    { sql: 'PRAGMA foreign_keys = on;', kind: 'rebuild', destructive: false, description: 'Restore foreign keys' }
-  ]
+    {
+      sql: 'PRAGMA foreign_keys = on;',
+      kind: 'rebuild',
+      destructive: false,
+      description: 'Restore foreign keys'
+    }
+  )
+  return statements
 }
 
 export interface AlterInput {
@@ -146,6 +332,8 @@ export interface AlterInput {
   schemaName: string
   originalName: string
   originalColumns: EditableColumn[]
+  /** Actual constraint name from introspection. PostgreSQL does not require table_pkey. */
+  primaryKeyName?: string
   nextName: string
   nextColumns: EditableColumn[]
   nextIndexes?: EditableIndex[]
@@ -158,6 +346,7 @@ export function buildAlterPlan(input: AlterInput): AlterPlan {
     schemaName,
     originalName,
     originalColumns,
+    primaryKeyName,
     nextName,
     nextColumns,
     nextIndexes = [],
@@ -174,6 +363,7 @@ export function buildAlterPlan(input: AlterInput): AlterPlan {
   const usable = nextColumns.filter((c) => c.name.trim())
   const keptOriginals = new Set(usable.map((c) => c.originalName).filter(Boolean) as string[])
   const dropped = originalColumns.filter((c) => !keptOriginals.has(c.originalName!))
+  const droppedNames = new Set(dropped.map((c) => c.originalName!.toLowerCase()))
   const added = usable.filter((c) => !c.originalName)
   const renamed = usable.filter((c) => c.originalName && c.originalName !== c.name.trim())
   const modified = usable.filter((c) => {
@@ -184,57 +374,96 @@ export function buildAlterPlan(input: AlterInput): AlterPlan {
 
   const tableRenamed = nextName.trim() !== originalName
 
-  /* ————— primary key ————— */
   const beforePk = originalColumns.filter((c) => c.primaryKey).map((c) => c.originalName!)
   const afterPk = usable.filter((c) => c.primaryKey).map((c) => c.name.trim())
+  // Compare stable column identities so merely renaming a PK column does not
+  // cause a pointless drop/recreate; databases update constraints on rename.
+  const afterPkOriginal = usable
+    .filter((c) => c.primaryKey)
+    .map((c) => c.originalName ?? `new:${c.name.trim()}`)
   const pkChanged =
-    beforePk.length !== afterPk.length || beforePk.some((n, i) => n !== afterPk[i])
+    beforePk.length !== afterPkOriginal.length ||
+    beforePk.some((n, i) => n !== afterPkOriginal[i])
 
-  /* ————— indexes & foreign keys ————— */
-  const droppedIndexes = nextIndexes.filter((i) => i.originalName && i.dropped && !i.primary)
+  const dependsOnDroppedColumn = (columns: string[]): boolean =>
+    columns.some((c) => droppedNames.has(c.toLowerCase()))
+
+  const droppedIndexes = nextIndexes.filter(
+    (i) => i.originalName && !i.primary && (i.dropped || dependsOnDroppedColumn(i.columns))
+  )
   const addedIndexes = nextIndexes.filter((i) => !i.originalName && !i.dropped && i.name.trim())
-  const droppedFks = nextForeignKeys.filter((f) => f.originalName && f.dropped)
+  const droppedFks = nextForeignKeys.filter(
+    (f) => f.originalName && (f.dropped || dependsOnDroppedColumn(f.columns))
+  )
   const addedFks = nextForeignKeys.filter((f) => !f.originalName && !f.dropped && f.refTable)
+  const droppedUniqueConstraint = droppedIndexes.some((i) => i.origin === 'u')
 
-  /* ————— SQLite: several changes have no in-place form ————— */
   const sqliteNeedsRebuild =
-    driver === 'sqlite' && (modified.length > 0 || pkChanged || droppedFks.length > 0 || addedFks.length > 0)
+    driver === 'sqlite' &&
+    (modified.length > 0 ||
+      pkChanged ||
+      droppedFks.length > 0 ||
+      addedFks.length > 0 ||
+      droppedUniqueConstraint)
 
   if (sqliteNeedsRebuild) {
     const reasons: string[] = []
     if (modified.length > 0) reasons.push('changing a column type, nullability or default')
     if (pkChanged) reasons.push('changing the primary key')
     if (addedFks.length || droppedFks.length) reasons.push('changing foreign keys')
+    if (droppedUniqueConstraint) reasons.push('removing a UNIQUE constraint')
     warnings.push(
       `SQLite cannot do ${reasons.join(' or ')} in place, so the table is rebuilt and the rows copied across.`
     )
-    const rebuilt = sqliteRebuild(
-      originalName,
-      nextName.trim() || originalName,
-      usable,
-      nextForeignKeys
-    )
-    // indexes live outside the table, so they are re-applied after the swap
-    for (const ix of droppedIndexes) {
-      rebuilt.push({
-        sql: buildDropIndex(driver, schemaName, nextName.trim() || originalName, ix.originalName!),
-        kind: 'drop-index',
-        destructive: false,
-        description: `Drop index ${ix.originalName}`
-      })
+    return {
+      statements: sqliteRebuild(
+        originalName,
+        nextName.trim() || originalName,
+        usable,
+        nextForeignKeys,
+        nextIndexes,
+        warnings
+      ),
+      warnings,
+      rebuild: true
     }
-    for (const ix of addedIndexes) {
-      rebuilt.push({
-        sql: buildCreateIndex(driver, schemaName, nextName.trim() || originalName, ix),
-        kind: 'add-index',
-        destructive: false,
-        description: `Create index ${ix.name}`
-      })
-    }
-    return { statements: rebuilt, warnings, rebuild: true }
   }
 
-  /* ————— columns ————— */
+  // Constraints/indexes that depend on a removed column must go first. This is
+  // especially important on MySQL, which otherwise rejects DROP COLUMN.
+  for (const fk of droppedFks) {
+    statements.push({
+      sql:
+        driver === 'mysql'
+          ? `ALTER TABLE ${qualified} DROP FOREIGN KEY ${quoteIdent(fk.originalName!, driver)};`
+          : `ALTER TABLE ${qualified} DROP CONSTRAINT ${quoteIdent(fk.originalName!, driver)};`,
+      kind: 'drop-foreign-key',
+      destructive: false,
+      description: `Drop foreign key ${fk.originalName}`
+    })
+  }
+
+  for (const ix of droppedIndexes) {
+    statements.push({
+      sql: buildDropIndex(driver, schemaName, originalName, ix.originalName!),
+      kind: 'drop-index',
+      destructive: false,
+      description: `Drop index ${ix.originalName}`
+    })
+  }
+
+  if (pkChanged && driver !== 'sqlite' && beforePk.length > 0) {
+    statements.push({
+      sql:
+        driver === 'mysql'
+          ? `ALTER TABLE ${qualified} DROP PRIMARY KEY;`
+          : `ALTER TABLE ${qualified} DROP CONSTRAINT ${quoteIdent(primaryKeyName || `${originalName}_pkey`, driver)};`,
+      kind: 'primary-key',
+      destructive: true,
+      description: 'Drop the existing primary key'
+    })
+  }
+
   for (const c of dropped) {
     statements.push({
       sql: `ALTER TABLE ${qualified} DROP COLUMN ${quoteIdent(c.originalName!, driver)};`,
@@ -247,9 +476,7 @@ export function buildAlterPlan(input: AlterInput): AlterPlan {
   for (const c of added) {
     const spec = columnSpec(c)
     if (!c.nullable && !c.defaultValue.trim()) {
-      warnings.push(
-        `${c.name} is NOT NULL with no default — this fails if the table already has rows.`
-      )
+      warnings.push(`${c.name} is NOT NULL with no default — this fails if the table already has rows.`)
     }
     statements.push({
       sql: `ALTER TABLE ${qualified} ADD COLUMN ${quoteIdent(c.name.trim(), driver)} ${spec};`,
@@ -260,7 +487,6 @@ export function buildAlterPlan(input: AlterInput): AlterPlan {
   }
 
   if (driver === 'mysql') {
-    // MySQL restates the whole definition; CHANGE also covers the rename
     for (const c of usable) {
       if (!c.originalName) continue
       const isRenamed = c.originalName !== c.name.trim()
@@ -307,9 +533,7 @@ export function buildAlterPlan(input: AlterInput): AlterPlan {
             destructive: !c.nullable,
             description: c.nullable ? `Allow NULL in ${c.name}` : `Require a value in ${c.name}`
           })
-          if (!c.nullable) {
-            warnings.push(`Setting ${c.name} NOT NULL fails if any existing row is NULL.`)
-          }
+          if (!c.nullable) warnings.push(`Setting ${c.name} NOT NULL fails if any existing row is NULL.`)
         }
         if ((before.defaultValue ?? '').trim() !== (c.defaultValue ?? '').trim()) {
           statements.push({
@@ -325,51 +549,19 @@ export function buildAlterPlan(input: AlterInput): AlterPlan {
     }
   }
 
-  /* ————— primary key ————— */
-  if (pkChanged && driver !== 'sqlite') {
+  if (pkChanged && driver !== 'sqlite' && afterPk.length > 0) {
     const cols = afterPk.map((c) => quoteIdent(c, driver)).join(', ')
-    if (driver === 'mysql') {
-      statements.push({
-        sql: afterPk.length
-          ? `ALTER TABLE ${qualified} DROP PRIMARY KEY, ADD PRIMARY KEY (${cols});`
-          : `ALTER TABLE ${qualified} DROP PRIMARY KEY;`,
-        kind: 'primary-key',
-        destructive: true,
-        description: afterPk.length ? `Set the primary key to ${afterPk.join(', ')}` : 'Drop the primary key'
-      })
-    } else {
-      if (beforePk.length > 0) {
-        statements.push({
-          sql: `ALTER TABLE ${qualified} DROP CONSTRAINT ${quoteIdent(`${originalName}_pkey`, driver)};`,
-          kind: 'primary-key',
-          destructive: true,
-          description: 'Drop the existing primary key'
-        })
-      }
-      if (afterPk.length > 0) {
-        statements.push({
-          sql: `ALTER TABLE ${qualified} ADD PRIMARY KEY (${cols});`,
-          kind: 'primary-key',
-          destructive: false,
-          description: `Set the primary key to ${afterPk.join(', ')}`
-        })
-      }
-    }
+    statements.push({
+      sql: `ALTER TABLE ${qualified} ADD PRIMARY KEY (${cols});`,
+      kind: 'primary-key',
+      destructive: false,
+      description: `Set the primary key to ${afterPk.join(', ')}`
+    })
     warnings.push('Changing the primary key fails if the new columns are not unique or contain NULL.')
+  } else if (pkChanged && beforePk.length > 0) {
+    warnings.push('Changing the primary key can affect foreign keys that reference this table.')
   }
 
-  /* ————— foreign keys ————— */
-  for (const fk of droppedFks) {
-    statements.push({
-      sql:
-        driver === 'mysql'
-          ? `ALTER TABLE ${qualified} DROP FOREIGN KEY ${quoteIdent(fk.originalName!, driver)};`
-          : `ALTER TABLE ${qualified} DROP CONSTRAINT ${quoteIdent(fk.originalName!, driver)};`,
-      kind: 'drop-foreign-key',
-      destructive: false,
-      description: `Drop foreign key ${fk.originalName}`
-    })
-  }
   for (const fk of addedFks) {
     const name = fk.name?.trim() || `${nextName.trim() || originalName}_${fk.columns.join('_')}_fkey`
     statements.push({
@@ -383,15 +575,6 @@ export function buildAlterPlan(input: AlterInput): AlterPlan {
     warnings.push('Adding a foreign key fails if existing rows do not match the referenced table.')
   }
 
-  /* ————— indexes ————— */
-  for (const ix of droppedIndexes) {
-    statements.push({
-      sql: buildDropIndex(driver, schemaName, originalName, ix.originalName!),
-      kind: 'drop-index',
-      destructive: false,
-      description: `Drop index ${ix.originalName}`
-    })
-  }
   for (const ix of addedIndexes) {
     statements.push({
       sql: buildCreateIndex(driver, schemaName, originalName, ix),
@@ -401,7 +584,6 @@ export function buildAlterPlan(input: AlterInput): AlterPlan {
     })
   }
 
-  /* ————— table rename last, so the statements above use the old name ————— */
   if (tableRenamed && nextName.trim()) {
     statements.push({
       sql:

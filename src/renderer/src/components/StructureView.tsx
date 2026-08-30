@@ -24,6 +24,18 @@ interface Props {
 
 type Pane = 'columns' | 'indexes' | 'keys' | 'ddl'
 
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return ''
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let n = value
+  let i = 0
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024
+    i++
+  }
+  return `${n >= 10 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`
+}
+
 export default function StructureView({
   details,
   driver,
@@ -52,7 +64,9 @@ export default function StructureView({
         originalName: i.name,
         columns: i.columns ?? [],
         unique: i.unique,
-        primary: i.primary
+        primary: i.primary,
+        origin: i.origin,
+        definition: i.definition
       }))
     )
     setEditFks(
@@ -63,8 +77,8 @@ export default function StructureView({
         columns: f.columns ?? [],
         refTable: f.refTable,
         refColumns: f.refColumns ?? [],
-        onDelete: 'NO ACTION' as const,
-        onUpdate: 'NO ACTION' as const
+        onDelete: f.onDelete ?? 'NO ACTION',
+        onUpdate: f.onUpdate ?? 'NO ACTION'
       }))
     )
     setPane('columns')
@@ -92,6 +106,7 @@ export default function StructureView({
             schemaName: details.schema,
             originalName: details.name,
             originalColumns: original,
+            primaryKeyName: details.primaryKeyName,
             nextName: editName,
             nextColumns: editColumns,
             nextIndexes: editIndexes,
@@ -111,6 +126,12 @@ export default function StructureView({
       ? `${details.schema}.${details.name}`
       : details.name
 
+  const rowLabel =
+    details.rowCount !== null
+      ? `${details.rowCountApproximate ? '~' : ''}${details.rowCount.toLocaleString()} rows`
+      : ''
+  const sizeLabel = details.sizeBytes != null ? formatBytes(details.sizeBytes) : ''
+
   return (
     <div className="results structure">
       <div className="struct-head">
@@ -118,7 +139,8 @@ export default function StructureView({
           <h3>{details.name}</h3>
           <span className="struct-sub">
             {details.kind} · {(details.columns ?? []).length} columns
-            {details.rowCount !== null && ` · ${details.rowCount.toLocaleString()} rows`}
+            {rowLabel && ` · ${rowLabel}`}
+            {sizeLabel && ` · ${sizeLabel}`}
           </span>
         </div>
         <span className="spacer" />
@@ -226,6 +248,7 @@ export default function StructureView({
 
             {pane === 'keys' && (
               <ForeignKeyEditor
+                driver={driver}
                 columnNames={editColumns.map((c) => c.name.trim()).filter(Boolean)}
                 tables={tables}
                 foreignKeys={editFks}
@@ -237,7 +260,9 @@ export default function StructureView({
           <div className="builder-sql edit-sql">
             <div className="builder-sql-bar">
               <span className="builder-sql-label">
-                {hasChanges ? `${plan!.statements.length} statement${plan!.statements.length === 1 ? '' : 's'}` : 'SQL'}
+                {hasChanges
+                  ? `${plan!.statements.length} statement${plan!.statements.length === 1 ? '' : 's'}`
+                  : 'SQL'}
               </span>
               <span className="spacer" />
               {hasChanges && (
@@ -256,129 +281,136 @@ export default function StructureView({
           </div>
         </>
       ) : (
-      <>
-      <div className="struct-tabs">
-        {(
-          [
-            ['columns', `Columns (${(details.columns ?? []).length})`],
-            ['indexes', `Indexes (${(details.indexes ?? []).length})`],
-            ['keys', `Foreign keys (${(details.foreignKeys ?? []).length})`],
-            ['ddl', 'DDL']
-          ] as [Pane, string][]
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            className={`struct-tab ${pane === key ? 'on' : ''}`}
-            onClick={() => setPane(key)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      <div className="struct-body">
-        {pane === 'columns' && (
-          <table className="grid struct-grid">
-            <thead>
-              <tr>
-                <th>Column</th>
-                <th>Type</th>
-                <th>Nullable</th>
-                <th>Default</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(details.columns ?? []).map((c) => (
-                <tr key={c.name}>
-                  <td>
-                    {c.isPrimary && <span className="pk-dot" title="Primary key" />}
-                    {c.name}
-                  </td>
-                  <td className="muted">{c.dataType}</td>
-                  <td className="muted">{c.nullable ? 'yes' : 'no'}</td>
-                  <td className="muted">{c.defaultValue ?? '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        {pane === 'indexes' && (
-          <table className="grid struct-grid">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Columns</th>
-                <th>Unique</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(details.indexes ?? []).map((ix, i) => (
-                <tr key={ix.name ?? i}>
-                  <td>
-                    {ix.primary && <span className="pk-dot" />}
-                    {ix.name}
-                  </td>
-                  <td className="muted">{(ix.columns ?? []).filter(Boolean).join(', ') || '—'}</td>
-                  <td className="muted">{ix.unique ? 'yes' : 'no'}</td>
-                </tr>
-              ))}
-              {(details.indexes ?? []).length === 0 && (
-                <tr>
-                  <td colSpan={3} className="muted">
-                    No indexes.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        )}
-
-        {pane === 'keys' && (
-          <table className="grid struct-grid">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Columns</th>
-                <th>References</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(details.foreignKeys ?? []).map((fk, i) => (
-                <tr key={fk.name ?? i}>
-                  <td>{fk.name}</td>
-                  <td className="muted">{(fk.columns ?? []).filter(Boolean).join(', ') || '—'}</td>
-                  <td className="muted">
-                    <button
-                      className="link"
-                      onClick={() => onQuery(`SELECT * FROM ${fk.refTable} LIMIT 100;`)}
-                    >
-                      {fk.refTable}({(fk.refColumns ?? []).filter(Boolean).join(', ')})
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {(details.foreignKeys ?? []).length === 0 && (
-                <tr>
-                  <td colSpan={3} className="muted">
-                    No foreign keys.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        )}
-
-        {pane === 'ddl' && (
-          <div className="ddl-pane">
-            <button className="btn-ghost copy-ddl" onClick={() => navigator.clipboard.writeText(details.ddl)}>
-              Copy
-            </button>
-            <pre>{details.ddl}</pre>
+        <>
+          <div className="struct-tabs">
+            {(
+              [
+                ['columns', `Columns (${(details.columns ?? []).length})`],
+                ['indexes', `Indexes (${(details.indexes ?? []).length})`],
+                ['keys', `Foreign keys (${(details.foreignKeys ?? []).length})`],
+                ['ddl', 'DDL']
+              ] as [Pane, string][]
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                className={`struct-tab ${pane === key ? 'on' : ''}`}
+                onClick={() => setPane(key)}
+              >
+                {label}
+              </button>
+            ))}
           </div>
-        )}
-      </div>
-      </>
+
+          <div className="struct-body">
+            {pane === 'columns' && (
+              <table className="grid struct-grid">
+                <thead>
+                  <tr>
+                    <th>Column</th>
+                    <th>Type</th>
+                    <th>Nullable</th>
+                    <th>Default</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(details.columns ?? []).map((c) => (
+                    <tr key={c.name}>
+                      <td>
+                        {c.isPrimary && <span className="pk-dot" title="Primary key" />}
+                        {c.name}
+                      </td>
+                      <td className="muted">{c.dataType}</td>
+                      <td className="muted">{c.nullable ? 'yes' : 'no'}</td>
+                      <td className="muted">{c.defaultValue ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {pane === 'indexes' && (
+              <table className="grid struct-grid">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Columns</th>
+                    <th>Unique</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(details.indexes ?? []).map((ix, i) => (
+                    <tr key={ix.name ?? i}>
+                      <td>
+                        {ix.primary && <span className="pk-dot" />}
+                        {ix.name}
+                      </td>
+                      <td className="muted">{(ix.columns ?? []).filter(Boolean).join(', ') || '—'}</td>
+                      <td className="muted">{ix.unique ? 'yes' : 'no'}</td>
+                    </tr>
+                  ))}
+                  {(details.indexes ?? []).length === 0 && (
+                    <tr>
+                      <td colSpan={3} className="muted">
+                        No indexes.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            )}
+
+            {pane === 'keys' && (
+              <table className="grid struct-grid">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Columns</th>
+                    <th>References</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(details.foreignKeys ?? []).map((fk, i) => (
+                    <tr key={fk.name ?? i}>
+                      <td>{fk.name}</td>
+                      <td className="muted">{(fk.columns ?? []).filter(Boolean).join(', ') || '—'}</td>
+                      <td className="muted">
+                        <button
+                          className="link"
+                          onClick={() => onQuery(`SELECT * FROM ${fk.refTable} LIMIT 100;`)}
+                        >
+                          {fk.refTable}({(fk.refColumns ?? []).filter(Boolean).join(', ')})
+                        </button>
+                      </td>
+                      <td className="muted">
+                        delete {fk.onDelete ?? 'NO ACTION'} · update {fk.onUpdate ?? 'NO ACTION'}
+                      </td>
+                    </tr>
+                  ))}
+                  {(details.foreignKeys ?? []).length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="muted">
+                        No foreign keys.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            )}
+
+            {pane === 'ddl' && (
+              <div className="ddl-pane">
+                <button
+                  className="btn-ghost copy-ddl"
+                  onClick={() => navigator.clipboard.writeText(details.ddl)}
+                >
+                  Copy
+                </button>
+                <pre>{details.ddl}</pre>
+              </div>
+            )}
+          </div>
+        </>
       )}
     </div>
   )

@@ -38,6 +38,7 @@ export default function ColumnBuilder<T extends ColumnDef>({
   const rowRefs = useRef<(HTMLDivElement | null)[]>([])
   const focusLast = useRef(false)
   const lastNameRef = useRef<HTMLInputElement>(null)
+  const fkActions = driver === 'mysql' ? FK_ACTIONS.filter((a) => a !== 'SET DEFAULT') : FK_ACTIONS
 
   const patch = (i: number, next: Partial<ColumnDef>): void => {
     onChange(columns.map((c, n) => (n === i ? { ...c, ...next } : c)) as T[])
@@ -116,31 +117,31 @@ export default function ColumnBuilder<T extends ColumnDef>({
 
   return (
     <div className="builder-columns">
-        <div className="col-head">
-          <span />
-          <span>Column</span>
-          <span>Type</span>
-          <span className="col-flag">Null</span>
-          <span className="col-flag">Key</span>
-          <span className="col-flag">Uniq</span>
-          <span>Default</span>
-          <span />
-          <span />
-        </div>
+      <div className="col-head">
+        <span />
+        <span>Column</span>
+        <span>Type</span>
+        <span className="col-flag">Null</span>
+        <span className="col-flag">Key</span>
+        <span className="col-flag">Uniq</span>
+        <span>Default</span>
+        <span />
+        <span />
+      </div>
 
-        {columns.map((c, i) => {
-          const auto = isAutoIncrement(c.type)
-          const bad = issueFor(i)
-          return (
-            <div
-              className="col-group"
-              key={c.id ?? i}
-              ref={(el) => {
-                rowRefs.current[i] = el
-              }}
-            >
-              {dropAt === i && dragFrom !== null && <div className="drop-line" />}
-              <div className={`col-row ${dragFrom === i ? 'lifted' : ''}`}>
+      {columns.map((c, i) => {
+        const auto = isAutoIncrement(c.type)
+        const bad = issueFor(i)
+        return (
+          <div
+            className="col-group"
+            key={c.id ?? i}
+            ref={(el) => {
+              rowRefs.current[i] = el
+            }}
+          >
+            {dropAt === i && dragFrom !== null && <div className="drop-line" />}
+            <div className={`col-row ${dragFrom === i ? 'lifted' : ''}`}>
               <button
                 className="col-grip"
                 title="Drag to reorder, or use the arrow keys"
@@ -173,7 +174,6 @@ export default function ColumnBuilder<T extends ColumnDef>({
                 />
               </span>
 
-              {/* editable combo: pick a common type or type your own */}
               <span className="col-cell">
                 <input
                   list={`types-${driver}`}
@@ -303,7 +303,7 @@ export default function ColumnBuilder<T extends ColumnDef>({
                     })
                   }
                 >
-                  {FK_ACTIONS.map((a) => (
+                  {fkActions.map((a) => (
                     <option key={a} value={a}>
                       {a.toLowerCase()}
                     </option>
@@ -318,7 +318,7 @@ export default function ColumnBuilder<T extends ColumnDef>({
                     })
                   }
                 >
-                  {FK_ACTIONS.map((a) => (
+                  {fkActions.map((a) => (
                     <option key={a} value={a}>
                       {a.toLowerCase()}
                     </option>
@@ -330,16 +330,16 @@ export default function ColumnBuilder<T extends ColumnDef>({
               </div>
             )}
           </div>
-          )
-        })}
+        )
+      })}
 
-        {dropAt === columns.length && dragFrom !== null && <div className="drop-line" />}
+      {dropAt === columns.length && dragFrom !== null && <div className="drop-line" />}
 
-        <datalist id={`types-${driver}`}>
-          {COLUMN_TYPES[driver].map((t) => (
-            <option key={t} value={t} />
-          ))}
-        </datalist>
+      <datalist id={`types-${driver}`}>
+        {COLUMN_TYPES[driver].map((t) => (
+          <option key={t} value={t} />
+        ))}
+      </datalist>
 
       <button className="col-add" onClick={addColumn}>
         <IconPlus /> Add column
@@ -347,4 +347,3 @@ export default function ColumnBuilder<T extends ColumnDef>({
     </div>
   )
 }
-
