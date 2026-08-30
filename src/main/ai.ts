@@ -7,7 +7,8 @@ import type {
   DbSchema,
   Driver
 } from '../shared/types'
-import { runQuery, splitStatements } from './db'
+import { splitStatements } from '../shared/sqlscan'
+import { runQuery } from './db'
 import { canAutoRun } from './sqlutil'
 import { getAiConfig } from './store'
 

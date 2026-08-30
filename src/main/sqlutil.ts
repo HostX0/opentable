@@ -1,4 +1,10 @@
 import type { Driver } from '../shared/types'
+import {
+  mainStatementWord,
+  maskSqlForAnalysis,
+  scanSqlWords,
+  type SqlWord
+} from '../shared/sqlscan'
 export { quoteIdent } from '../shared/sql'
 
 /** Renders a value as a SQL literal. Display/logging only — execution uses parameters. */
@@ -21,16 +27,52 @@ export interface BuiltStatement {
   display: string
 }
 
-/** True when a statement changes data or structure. */
-export function isDestructive(sql: string): boolean {
-  return /^\s*(update|delete|drop|truncate|alter|insert|replace|create|grant|revoke)\b/i.test(sql)
+const WRITE_WORDS = new Set([
+  'insert',
+  'update',
+  'delete',
+  'drop',
+  'truncate',
+  'alter',
+  'create',
+  'grant',
+  'revoke',
+  'merge',
+  'replace',
+  'upsert',
+  'rename',
+  'copy',
+  'call',
+  'do'
+])
+
+const CTE_WRITE_WORDS = new Set(['insert', 'update', 'delete', 'merge'])
+
+/**
+ * A write nested in a WITH body. Looking only inside a leading WITH avoids
+ * treating ordinary function/column names in a SELECT as write verbs.
+ */
+function cteWriteWord(sql: string): SqlWord | undefined {
+  const words = scanSqlWords(sql)
+  const firstTopLevel = words.find((word) => word.depth === 0)
+  if (firstTopLevel?.value !== 'with') return undefined
+  return words.find((word) => word.depth > 0 && CTE_WRITE_WORDS.has(word.value))
 }
 
-/** UPDATE/DELETE with no WHERE clause — the classic production accident. */
+/** True when a statement changes data/structure, including a data-changing CTE. */
+export function isDestructive(sql: string): boolean {
+  const main = mainStatementWord(sql)
+  if (main && WRITE_WORDS.has(main.value)) return true
+  return cteWriteWord(sql) !== undefined
+}
+
+/** UPDATE/DELETE with no top-level WHERE clause — the classic production accident. */
 export function isUnscopedWrite(sql: string): boolean {
-  const s = sql.trim()
-  if (!/^\s*(update|delete)\b/i.test(s)) return false
-  return !/\bwhere\b/i.test(s)
+  const main = mainStatementWord(sql)
+  if (!main || (main.value !== 'update' && main.value !== 'delete')) return false
+  return !scanSqlWords(sql).some(
+    (word) => word.depth === main.depth && word.start > main.end && word.value === 'where'
+  )
 }
 
 /* ————————————————————— auto-run classification ————————————————————— */
@@ -49,12 +91,12 @@ export function isUnscopedWrite(sql: string): boolean {
  *   SELECT * INTO new_table FROM t                          -- creates a table (Postgres)
  *   SELECT * FROM t INTO OUTFILE '/tmp/x'                   -- writes a file (MySQL)
  *   SELECT * FROM t FOR UPDATE                              -- takes row locks
- *   SELECT pg_sleep(9999)                                   -- ties up the connection
+ *   SELECT nextval('orders_id_seq')                         -- mutates a sequence
  */
 const NEEDS_APPROVAL = [
   // anything that writes data or structure, wherever it appears
-  /\b(insert|update|delete|drop|truncate|alter|create|grant|revoke|upsert)\b/i,
-  // REPLACE() and MERGE() are also ordinary functions, so only bar them as verbs
+  /\b(insert|update|delete|drop|truncate|alter|create|grant|revoke|upsert|rename)\b/i,
+  // REPLACE() and MERGE() are also ordinary functions, so only bar them as outer verbs.
   /^\s*(replace|merge)\b/i,
   // procedural escapes
   /\b(call|do|execute|prepare|deallocate)\b/i,
@@ -66,50 +108,9 @@ const NEEDS_APPROVAL = [
   /\binto\b/i,
   // locking reads
   /\bfor\s+(update|share|no\s+key\s+update|key\s+share)\b/i,
-  // trivially available denial of service
-  /\b(pg_sleep|sleep|benchmark|generate_series)\s*\(/i
+  // functions that mutate server state or can trivially tie up the connection
+  /\b(nextval|setval|pg_advisory_lock|pg_advisory_xact_lock|get_lock|release_lock|pg_sleep|sleep|benchmark|generate_series)\s*\(/i
 ]
-
-/** Removes comments and literal contents so keyword matching cannot be fooled. */
-function analysable(sql: string): string {
-  let out = ''
-  let i = 0
-  let quote: string | null = null
-  while (i < sql.length) {
-    const ch = sql[i]
-    const next = sql[i + 1]
-    if (quote) {
-      if (ch === '\\' && quote !== '`') {
-        i += 2
-        continue
-      }
-      if (ch === quote) {
-        quote = null
-        out += ' '
-      }
-      i++
-      continue
-    }
-    if (ch === "'" || ch === '"' || ch === '`') {
-      quote = ch
-      i++
-      continue
-    }
-    if (ch === '-' && next === '-') {
-      while (i < sql.length && sql[i] !== '\n') i++
-      continue
-    }
-    if (ch === '/' && next === '*') {
-      while (i < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) i++
-      i += 2
-      out += ' '
-      continue
-    }
-    out += ch
-    i++
-  }
-  return out
-}
 
 export interface AutoRunVerdict {
   /** true when the assistant may run this itself without interrupting */
@@ -119,19 +120,28 @@ export interface AutoRunVerdict {
 }
 
 /**
- * `statements` comes from splitStatements, which is quote- and comment-aware.
- * Anything that is not a single, plainly read-only SELECT needs approval.
+ * `statements` comes from splitStatements, which is quote/comment/dollar-quote
+ * aware. Anything that is not a single, plainly read-only SELECT needs approval.
  */
 export function canAutoRun(statements: string[]): AutoRunVerdict {
   if (statements.length === 0) return { autoRun: false, reason: 'empty statement' }
   if (statements.length > 1) {
     return { autoRun: false, reason: `${statements.length} statements in one block` }
   }
-  const text = analysable(statements[0])
-  if (!/^\s*(select|with)\b/i.test(text)) {
-    const verb = /^\s*([a-z_]+)/i.exec(text.trim())?.[1] ?? 'statement'
+
+  const original = statements[0]
+  const main = mainStatementWord(original)
+  if (!main || main.value !== 'select') {
+    const verb = main?.value ?? 'statement'
     return { autoRun: false, reason: `${verb.toUpperCase()} changes the database` }
   }
+
+  const nestedWrite = cteWriteWord(original)
+  if (nestedWrite) {
+    return { autoRun: false, reason: `contains ${nestedWrite.value.toUpperCase()}` }
+  }
+
+  const text = maskSqlForAnalysis(original)
   for (const pattern of NEEDS_APPROVAL) {
     const hit = pattern.exec(text)
     if (hit) return { autoRun: false, reason: `contains ${hit[0].trim().toUpperCase()}` }
