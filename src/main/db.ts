@@ -38,9 +38,33 @@ interface Active {
   /** backend pid / thread id used to cancel a running statement */
   backendId?: number
   running: boolean
+  /** set when the socket died; the next query reconnects rather than failing */
+  lost?: boolean
 }
 
 const active = new Map<string, Active>()
+
+export type ConnectionState = 'connected' | 'reconnecting' | 'lost'
+
+type StateListener = (id: string, state: ConnectionState, detail?: string) => void
+let notifyState: StateListener = () => {}
+
+/** Set by the main process so connection changes reach the window. */
+export function onConnectionState(fn: StateListener): void {
+  notifyState = fn
+}
+
+/**
+ * A dropped socket used to delete the connection outright, so the next query
+ * said "Not connected" with no way back but restarting the app. Keep the
+ * record and its config instead, mark it lost, and let the next query heal it.
+ */
+function markLost(id: string, detail?: string): void {
+  const a = active.get(id)
+  if (!a || a.lost) return
+  a.lost = true
+  notifyState(id, 'lost', detail)
+}
 
 // ---------------------------------------------------------------- SSH tunnel
 
@@ -310,6 +334,7 @@ export async function connect(cfg: ConnectionConfig): Promise<ConnectResult> {
       const lite = new DatabaseSync(path)
       const v = lite.prepare('select sqlite_version() as v').get() as { v: string }
       active.set(cfg.id, { config: cfg, driver: 'sqlite', lite, running: false })
+      startHeartbeat()
       return { ok: true, serverVersion: `SQLite ${v.v}` }
     }
 
@@ -328,10 +353,14 @@ export async function connect(cfg: ConnectionConfig): Promise<ConnectResult> {
         // always exists, and they can switch with the picker once connected
         database: cfg.database || 'postgres',
         ssl: cfg.ssl ? { rejectUnauthorized: !cfg.sslInsecure } : undefined,
-        connectionTimeoutMillis: 15000
+        connectionTimeoutMillis: 15000,
+        // without this an idle session is dropped by NAT, a load balancer or
+        // the server's own timeout, with no notice to either end
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 10_000
       })
       await pg.connect()
-      pg.on('error', () => active.delete(cfg.id))
+      pg.on('error', (err) => markLost(cfg.id, err?.message))
       const v = await pg.query('select version()')
       active.set(cfg.id, {
         config: cfg,
@@ -341,6 +370,7 @@ export async function connect(cfg: ConnectionConfig): Promise<ConnectResult> {
         backendId: (pg as unknown as { processID?: number }).processID,
         running: false
       })
+      startHeartbeat()
       return { ok: true, serverVersion: String(v.rows[0]?.version ?? '') }
     }
 
@@ -352,9 +382,11 @@ export async function connect(cfg: ConnectionConfig): Promise<ConnectResult> {
       database: cfg.database || undefined,
       multipleStatements: true,
       connectTimeout: 15000,
-      ssl: cfg.ssl ? { rejectUnauthorized: !cfg.sslInsecure } : undefined
+      ssl: cfg.ssl ? { rejectUnauthorized: !cfg.sslInsecure } : undefined,
+      enableKeepAlive: true,
+      keepAliveInitialDelay: 10_000
     })
-    my.on('error', () => active.delete(cfg.id))
+    my.on('error', (err: { message?: string }) => markLost(cfg.id, err?.message))
     const [rows] = await my.query('select version() as v')
     active.set(cfg.id, {
       config: cfg,
@@ -364,11 +396,48 @@ export async function connect(cfg: ConnectionConfig): Promise<ConnectResult> {
       backendId: (my as unknown as { threadId?: number }).threadId,
       running: false
     })
+    startHeartbeat()
     return { ok: true, serverVersion: String((rows as { v: string }[])[0]?.v ?? '') }
   } catch (err) {
     closeTunnel(tunnel)
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
+}
+
+/**
+ * Reconnects a session that was marked lost, using the config it was opened
+ * with. Called before anything that touches the server, so a dropped socket
+ * costs one reconnect rather than a restart of the app.
+ */
+async function ensureLive(id: string): Promise<void> {
+  const a = active.get(id)
+  if (!a || !a.lost) return
+  notifyState(id, 'reconnecting')
+  const res = await connect(a.config)
+  if (!res.ok) {
+    notifyState(id, 'lost', res.error)
+    throw new Error(`Connection lost, and reconnecting failed: ${res.error}`)
+  }
+  notifyState(id, 'connected')
+}
+
+/** Idle sessions are reaped by servers, NAT and load balancers alike. A cheap
+ *  round trip keeps them alive and surfaces a death before the user meets it. */
+const HEARTBEAT_MS = 30_000
+let heartbeat: NodeJS.Timeout | undefined
+
+function startHeartbeat(): void {
+  if (heartbeat) return
+  heartbeat = setInterval(() => {
+    for (const [id, a] of active) {
+      // sqlite is a local file, and a busy connection is proof enough of life
+      if (a.driver === 'sqlite' || a.running || a.lost) continue
+      const ping = a.pg ? a.pg.query('select 1') : a.my?.query('select 1')
+      void Promise.resolve(ping).catch((err) =>
+        markLost(id, err instanceof Error ? err.message : String(err))
+      )
+    }
+  }, HEARTBEAT_MS)
 }
 
 export async function disconnect(id: string): Promise<void> {
@@ -398,6 +467,10 @@ export async function disconnect(id: string): Promise<void> {
 }
 
 export async function disconnectAll(): Promise<void> {
+  if (heartbeat) {
+    clearInterval(heartbeat)
+    heartbeat = undefined
+  }
   await Promise.all([...active.keys()].map((id) => disconnect(id)))
 }
 
@@ -606,6 +679,7 @@ export async function runQuery(
   sql: string,
   opts: { rowLimit?: number } = {}
 ): Promise<QueryResult> {
+  await ensureLive(id)
   const a = active.get(id)
   if (!a) throw new Error('Not connected')
   const limit = opts.rowLimit ?? 0
@@ -704,6 +778,7 @@ function readSqliteColumns(lite: DatabaseSync, sql: string): string[] {
 // ---------------------------------------------------------------- schema
 
 export async function getSchema(id: string): Promise<DbSchema> {
+  await ensureLive(id)
   const a = active.get(id)
   if (!a) throw new Error('Not connected')
 
@@ -845,6 +920,7 @@ export async function getTableDetails(
   schemaName: string,
   table: string
 ): Promise<TableDetails> {
+  await ensureLive(id)
   const a = active.get(id)
   if (!a) throw new Error('Not connected')
   const schema = await getSchema(id)
@@ -1043,6 +1119,7 @@ export async function applyChanges(
   table: { schema: string; name: string },
   changes: PendingChange[]
 ): Promise<ApplyResult> {
+  await ensureLive(id)
   const a = active.get(id)
   if (!a) return { ok: false, error: 'Not connected' }
   if (changes.length === 0) return { ok: true, affected: 0, statements: [] }
@@ -1188,6 +1265,7 @@ export async function applyAlter(
   id: string,
   statements: string[]
 ): Promise<{ ok: boolean; error?: string; applied: number }> {
+  await ensureLive(id)
   const a = active.get(id)
   if (!a) return { ok: false, error: 'Not connected', applied: 0 }
   if (statements.length === 0) return { ok: true, applied: 0 }
@@ -1244,6 +1322,7 @@ export async function applyAlter(
 }
 
 export async function listDatabases(id: string): Promise<string[]> {
+  await ensureLive(id)
   const a = active.get(id)
   if (!a) throw new Error('Not connected')
   if (a.driver === 'sqlite') return [a.config.filePath?.split('/').pop() ?? 'main']

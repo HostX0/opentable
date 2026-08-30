@@ -220,6 +220,7 @@ export function installDevMock(): void {
         }
       }
     },
+    onDbState: () => () => undefined,
     chats: {
       list: async () => devChats,
       save: async (session: ChatSession) => {

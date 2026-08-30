@@ -138,6 +138,9 @@ export default function App(): React.JSX.Element {
     window.opentable.settings.get().then(setSettings)
     window.opentable.history.list(100).then(setHistory)
     window.opentable.saved.list().then(setSaved)
+    const offDb = window.opentable.onDbState(({ id, state }) => {
+      setStates((s) => ({ ...s, [id]: state as ConnState }))
+    })
     const off = window.opentable.updates.onState(setUpdateState)
     return off
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -888,12 +891,24 @@ export default function App(): React.JSX.Element {
           </ErrorBoundary>
 
           <div className="statusbar">
-            <span className={`sb-item ${activeState === 'connected' ? 'sb-live' : ''}`}>
+            <span
+              className={`sb-item sb-conn ${activeState}`}
+              title={
+                activeState === 'lost'
+                  ? 'The connection dropped. It reconnects on your next query.'
+                  : undefined
+              }
+            >
+              <span className="sb-dot" />
               {activeState === 'connected'
                 ? activeConn?.name
                 : activeState === 'connecting'
                   ? 'connecting…'
-                  : 'not connected'}
+                  : activeState === 'reconnecting'
+                    ? 'reconnecting…'
+                    : activeState === 'lost'
+                      ? `${activeConn?.name ?? 'connection'} — dropped`
+                      : 'not connected'}
             </span>
             {activeConn?.environment === 'production' && (
               <span className="sb-item sb-prod">production</span>
@@ -922,6 +937,7 @@ export default function App(): React.JSX.Element {
           connectionId={activeId}
           connectionName={connections.find((c) => c.id === activeId)?.name ?? ''}
           driver={connections.find((c) => c.id === activeId)?.driver ?? 'postgres'}
+          database={connections.find((c) => c.id === activeId)?.database ?? ''}
           onClose={() => setChatOpen(false)}
           onOpenSettings={() => setSettingsOpen(true)}
           onInsert={useSql}

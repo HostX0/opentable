@@ -97,6 +97,9 @@ declare global {
         ) => Promise<ChatTurn>
         onChatDelta: (cb: (text: string) => void) => () => void
       }
+      onDbState: (
+        cb: (e: { id: string; state: string; detail?: string }) => void
+      ) => () => void
       chats: {
         list: () => Promise<ChatSession[]>
         save: (session: ChatSession) => Promise<ChatSession[]>

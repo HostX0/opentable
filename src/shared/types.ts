@@ -206,9 +206,14 @@ export type ChatEntry =
 export interface ChatSession {
   id: string
   title: string
-  /** which connection it was held against, so it can be reopened in context */
+  /**
+   * The connection and database this conversation was held against. A chat is
+   * only meaningful next to the schema it was grounded in, so it is never
+   * offered anywhere else.
+   */
   connectionId: string | null
   connectionName: string
+  database: string
   createdAt: number
   updatedAt: number
   entries: ChatEntry[]

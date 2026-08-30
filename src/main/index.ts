@@ -182,6 +182,13 @@ function registerHandlers(): void {
     store.updateSettings(patch)
   )
 
+  // a dropped socket used to be invisible until the next query failed
+  db.onConnectionState((id, state, detail) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('db:state', { id, state, detail })
+    }
+  })
+
   /* ————— chat sessions ————— */
   ipcMain.handle('chats:list', () => store.listChats())
   ipcMain.handle('chats:save', (_e, session: ChatSession) => store.saveChat(session))

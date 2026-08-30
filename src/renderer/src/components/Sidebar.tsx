@@ -16,7 +16,7 @@ import {
   IconView
 } from './icons'
 
-export type ConnState = 'idle' | 'connecting' | 'connected' | 'error'
+export type ConnState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'lost' | 'error'
 
 interface Props {
   connections: ConnectionSummary[]

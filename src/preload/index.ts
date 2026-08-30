@@ -62,6 +62,12 @@ const api = {
       return () => ipcRenderer.removeListener('ai:chat-delta', handler)
     }
   },
+  onDbState: (cb: (e: { id: string; state: string; detail?: string }) => void) => {
+    const handler = (_e: unknown, payload: { id: string; state: string; detail?: string }): void =>
+      cb(payload)
+    ipcRenderer.on('db:state', handler)
+    return () => ipcRenderer.removeListener('db:state', handler)
+  },
   chats: {
     list: () => ipcRenderer.invoke('chats:list'),
     save: (session: ChatSession) => ipcRenderer.invoke('chats:save', session),

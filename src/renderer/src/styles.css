@@ -3886,3 +3886,44 @@ body.resizing-col {
 .chat-msg.assistant {
   white-space: normal;
 }
+
+/* ————— connection state in the status bar ————— */
+
+.sb-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sb-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+  flex: 0 0 auto;
+}
+
+.sb-conn.connected .sb-dot {
+  background: var(--ok);
+}
+
+.sb-conn.connecting .sb-dot,
+.sb-conn.reconnecting .sb-dot {
+  background: var(--ok);
+  animation: sb-pulse 1.1s ease-in-out infinite;
+}
+
+.sb-conn.lost .sb-dot,
+.sb-conn.error .sb-dot {
+  background: var(--danger);
+}
+
+.sb-conn.lost,
+.sb-conn.error {
+  color: var(--danger);
+}
+
+@keyframes sb-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}

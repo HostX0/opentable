@@ -24,6 +24,7 @@ import SqlPreview from './SqlPreview'
 interface Props {
   connectionId: string | null
   connectionName: string
+  database: string
   driver: Driver
   onClose: () => void
   onOpenSettings: () => void
@@ -54,11 +55,16 @@ function storeWidth(w: number): void {
   }
 }
 
-const newSession = (connectionId: string | null, connectionName: string): ChatSession => ({
+const newSession = (
+  connectionId: string | null,
+  connectionName: string,
+  database: string
+): ChatSession => ({
   id: crypto.randomUUID(),
   title: 'New chat',
   connectionId,
   connectionName,
+  database,
   createdAt: Date.now(),
   updatedAt: Date.now(),
   entries: [],
@@ -222,7 +228,7 @@ function SessionList({
         >
           <span className="chat-session-title">{s.title}</span>
           <span className="chat-session-meta">
-            {s.connectionName || 'no connection'} · {relative(s.updatedAt)}
+            {s.database || s.connectionName || 'no database'} · {relative(s.updatedAt)}
           </span>
           <button
             className="chat-session-del"
@@ -248,15 +254,16 @@ function SessionList({
 export default function ChatPanel({
   connectionId,
   connectionName,
+  database,
   driver,
   onClose,
   onOpenSettings,
   onInsert
 }: Props): React.JSX.Element {
   const [session, setSession] = useState<ChatSession>(() =>
-    newSession(connectionId, connectionName)
+    newSession(connectionId, connectionName, database)
   )
-  const [sessions, setSessions] = useState<ChatSession[]>([])
+  const [allSessions, setAllSessions] = useState<ChatSession[]>([])
   const [pending, setPending] = useState<ChatQuery | null>(null)
   const [busy, setBusy] = useState(false)
   const [streaming, setStreaming] = useState('')
@@ -270,8 +277,17 @@ export default function ChatPanel({
   const dragging = useRef(false)
 
   useEffect(() => {
-    void window.opentable.chats.list().then(setSessions)
+    void window.opentable.chats.list().then(setAllSessions)
   }, [])
+
+  /**
+   * Only conversations held against this database. A chat is grounded in one
+   * schema — reopening it beside a different database would show answers about
+   * tables that are not there.
+   */
+  const sessions = allSessions.filter(
+    (s) => s.connectionId === connectionId && s.database === database
+  )
 
   // tokens arrive on their own channel; the buffer is cleared when the turn lands
   useEffect(() => {
@@ -325,17 +341,29 @@ export default function ChatPanel({
     if (next.entries.length === 0) return
     const stamped = { ...next, title: titleFrom(next.entries), updatedAt: Date.now() }
     setSession(stamped)
-    setSessions(await window.opentable.chats.save(stamped))
+    setAllSessions(await window.opentable.chats.save(stamped))
   }, [])
 
   const startNew = useCallback((): void => {
-    setSession(newSession(connectionId, connectionName))
+    setSession(newSession(connectionId, connectionName, database))
     setPending(null)
     setStreaming('')
     setDraft('')
     setShowList(false)
     inputRef.current?.focus()
-  }, [connectionId, connectionName])
+  }, [connectionId, connectionName, database])
+
+  // switching database mid-conversation would leave a chat grounded in a schema
+  // that is no longer loaded, so start a fresh one
+  useEffect(() => {
+    setSession((cur) =>
+      cur.connectionId === connectionId && cur.database === database
+        ? cur
+        : newSession(connectionId, connectionName, database)
+    )
+    setPending(null)
+    setStreaming('')
+  }, [connectionId, database, connectionName])
 
   const openSession = useCallback((s: ChatSession): void => {
     setSession(s)
@@ -346,7 +374,7 @@ export default function ChatPanel({
 
   const removeSession = useCallback(
     async (id: string): Promise<void> => {
-      setSessions(await window.opentable.chats.delete(id))
+      setAllSessions(await window.opentable.chats.delete(id))
       if (id === session.id) startNew()
     },
     [session.id, startNew]
