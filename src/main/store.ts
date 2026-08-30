@@ -1,6 +1,6 @@
 import { app, safeStorage } from 'electron'
 import { join } from 'path'
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'fs'
 import type {
   AiProvider,
   AppSettings,
@@ -26,16 +26,23 @@ interface StoredSettings {
   aiModel: string
 }
 
+interface SessionSecrets {
+  password?: string
+  sshPassword?: string
+  sshPassphrase?: string
+}
+
 const DEFAULT_SETTINGS: StoredSettings = {
   defaultRowLimit: 500,
   confirmDestructive: true,
-  // Anthropic stays the default so existing installs are unaffected
   aiProvider: 'anthropic',
   aiBaseUrl: '',
   aiModel: 'claude-sonnet-5'
 }
 
 const HISTORY_CAP = 500
+const sessionConnectionSecrets = new Map<string, SessionSecrets>()
+let sessionAiKey: string | undefined
 
 const dataDir = (): string => app.getPath('userData')
 const filePath = (name: string): string => join(dataDir(), name)
@@ -50,50 +57,128 @@ function readJson<T>(name: string, fallback: T): T {
   }
 }
 
+/** Atomic replace so a crash cannot leave half-written JSON behind. */
 function writeJson(name: string, value: unknown): void {
   mkdirSync(dataDir(), { recursive: true })
-  writeFileSync(filePath(name), JSON.stringify(value, null, 2), 'utf-8')
+  const target = filePath(name)
+  const tmp = `${target}.tmp-${process.pid}`
+  writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf-8', mode: 0o600 })
+  renameSync(tmp, target)
+}
+
+/**
+ * Electron can fall back to Linux's `basic_text` backend. It is deliberately
+ * excluded here: a password manager must not silently turn a secret into
+ * reversible local text just because a system keyring is unavailable.
+ */
+function secureStorageAvailable(): boolean {
+  if (!safeStorage.isEncryptionAvailable()) return false
+  if (process.platform !== 'linux') return true
+  try {
+    const backend = (
+      safeStorage as unknown as { getSelectedStorageBackend?: () => string }
+    ).getSelectedStorageBackend?.()
+    return backend !== 'basic_text'
+  } catch {
+    return false
+  }
 }
 
 function encrypt(value: string | undefined): string | undefined {
-  if (!value) return undefined
-  if (safeStorage.isEncryptionAvailable()) {
-    return 'enc:' + safeStorage.encryptString(value).toString('base64')
+  if (!value || !secureStorageAvailable()) return undefined
+  return 'enc:' + safeStorage.encryptString(value).toString('base64')
+}
+
+function legacyRaw(value: string | undefined): string | undefined {
+  if (!value?.startsWith('raw:')) return undefined
+  try {
+    return Buffer.from(value.slice(4), 'base64').toString('utf-8')
+  } catch {
+    return undefined
   }
-  return 'raw:' + Buffer.from(value, 'utf-8').toString('base64')
 }
 
 function decrypt(value: string | undefined): string | undefined {
   if (!value) return undefined
   try {
-    if (value.startsWith('enc:')) {
+    if (value.startsWith('enc:') && secureStorageAvailable()) {
       return safeStorage.decryptString(Buffer.from(value.slice(4), 'base64'))
     }
-    if (value.startsWith('raw:')) {
-      return Buffer.from(value.slice(4), 'base64').toString('utf-8')
-    }
+    // Read old versions long enough to migrate them out of the file. New code
+    // never writes raw: secrets.
+    if (value.startsWith('raw:')) return legacyRaw(value)
   } catch {
     return undefined
   }
-  return value
+  return undefined
 }
 
 /* ————————————————————— connections ————————————————————— */
 
 function readConnections(): StoredConnection[] {
-  return readJson<StoredConnection[]>('connections.json', [])
+  const items = readJson<StoredConnection[]>('connections.json', [])
+  let migrated = false
+
+  for (const item of items) {
+    const session = sessionConnectionSecrets.get(item.id) ?? {}
+    const password = legacyRaw(item.passwordEnc)
+    const sshPassword = legacyRaw(item.sshPasswordEnc)
+    const sshPassphrase = legacyRaw(item.sshPassphraseEnc)
+    if (password !== undefined) {
+      session.password = password
+      delete item.passwordEnc
+      migrated = true
+    }
+    if (sshPassword !== undefined) {
+      session.sshPassword = sshPassword
+      delete item.sshPasswordEnc
+      migrated = true
+    }
+    if (sshPassphrase !== undefined) {
+      session.sshPassphrase = sshPassphrase
+      delete item.sshPassphraseEnc
+      migrated = true
+    }
+    if (Object.keys(session).length) sessionConnectionSecrets.set(item.id, session)
+  }
+
+  // Upgrade legacy raw: values immediately. If the OS keychain is available we
+  // persist encrypted replacements; otherwise the migrated values stay in RAM
+  // for this session and disappear from disk.
+  if (migrated) {
+    for (const item of items) {
+      const session = sessionConnectionSecrets.get(item.id)
+      if (!session || !secureStorageAvailable()) continue
+      if (session.password && !item.passwordEnc) {
+        item.passwordEnc = encrypt(session.password)
+        delete session.password
+      }
+      if (session.sshPassword && !item.sshPasswordEnc) {
+        item.sshPasswordEnc = encrypt(session.sshPassword)
+        delete session.sshPassword
+      }
+      if (session.sshPassphrase && !item.sshPassphraseEnc) {
+        item.sshPassphraseEnc = encrypt(session.sshPassphrase)
+        delete session.sshPassphrase
+      }
+      if (!Object.keys(session).length) sessionConnectionSecrets.delete(item.id)
+    }
+    writeJson('connections.json', items)
+  }
+  return items
 }
 
 export function listConnections(): ConnectionSummary[] {
   return readConnections().map((s) => {
-    // the *Enc fields are intentionally dropped here — secrets never reach the renderer
     const { passwordEnc: _p, sshPasswordEnc: _sp, sshPassphraseEnc: _spp, ssh, ...rest } = s
+    const session = sessionConnectionSecrets.get(s.id)
     return {
       ...rest,
-      hasPassword: Boolean(s.passwordEnc),
+      hasPassword: Boolean(s.passwordEnc || session?.password),
       ssh: ssh
         ? {
             enabled: ssh.enabled,
+            authMethod: ssh.authMethod,
             host: ssh.host,
             port: ssh.port,
             user: ssh.user,
@@ -108,23 +193,46 @@ export function saveConnection(cfg: ConnectionConfig): ConnectionSummary[] {
   const items = readConnections()
   const existing = items.find((s) => s.id === cfg.id)
   const { password, ssh, ...rest } = cfg
+  const session = sessionConnectionSecrets.get(cfg.id) ?? {}
+  const canPersist = secureStorageAvailable()
+
+  const persistOrSession = (
+    value: string | undefined,
+    existingValue: string | undefined,
+    sessionKey: keyof SessionSecrets
+  ): string | undefined => {
+    if (!value) return existingValue
+    if (canPersist) {
+      delete session[sessionKey]
+      return encrypt(value)
+    }
+    session[sessionKey] = value
+    return undefined
+  }
 
   const stored: StoredConnection = {
     ...rest,
     ssh: ssh
       ? {
           enabled: ssh.enabled,
+          authMethod: ssh.authMethod,
           host: ssh.host,
           port: ssh.port,
           user: ssh.user,
           privateKeyPath: ssh.privateKeyPath
         }
       : undefined,
-    // keep previously saved secrets when the form leaves them blank
-    passwordEnc: password ? encrypt(password) : existing?.passwordEnc,
-    sshPasswordEnc: ssh?.password ? encrypt(ssh.password) : existing?.sshPasswordEnc,
-    sshPassphraseEnc: ssh?.passphrase ? encrypt(ssh.passphrase) : existing?.sshPassphraseEnc
+    passwordEnc: persistOrSession(password, existing?.passwordEnc, 'password'),
+    sshPasswordEnc: persistOrSession(ssh?.password, existing?.sshPasswordEnc, 'sshPassword'),
+    sshPassphraseEnc: persistOrSession(
+      ssh?.passphrase,
+      existing?.sshPassphraseEnc,
+      'sshPassphrase'
+    )
   }
+
+  if (Object.keys(session).length) sessionConnectionSecrets.set(cfg.id, session)
+  else sessionConnectionSecrets.delete(cfg.id)
 
   const idx = items.findIndex((s) => s.id === cfg.id)
   if (idx >= 0) items[idx] = stored
@@ -134,6 +242,7 @@ export function saveConnection(cfg: ConnectionConfig): ConnectionSummary[] {
 }
 
 export function deleteConnection(id: string): ConnectionSummary[] {
+  sessionConnectionSecrets.delete(id)
   writeJson(
     'connections.json',
     readConnections().filter((s) => s.id !== id)
@@ -144,12 +253,17 @@ export function deleteConnection(id: string): ConnectionSummary[] {
 export function getFullConfig(id: string): ConnectionConfig | undefined {
   const s = readConnections().find((c) => c.id === id)
   if (!s) return undefined
+  const session = sessionConnectionSecrets.get(id)
   const { passwordEnc, sshPasswordEnc, sshPassphraseEnc, ssh, ...rest } = s
   return {
     ...rest,
-    password: decrypt(passwordEnc),
+    password: decrypt(passwordEnc) ?? session?.password,
     ssh: ssh
-      ? { ...ssh, password: decrypt(sshPasswordEnc), passphrase: decrypt(sshPassphraseEnc) }
+      ? {
+          ...ssh,
+          password: decrypt(sshPasswordEnc) ?? session?.sshPassword,
+          passphrase: decrypt(sshPassphraseEnc) ?? session?.sshPassphrase
+        }
       : undefined
   }
 }
@@ -198,7 +312,6 @@ export function deleteSaved(id: string): SavedQuery[] {
 
 /* ————————————————————— chat sessions ————————————————————— */
 
-/** Conversations are capped so the file cannot grow without bound. */
 const CHAT_CAP = 100
 
 export function listChats(): ChatSession[] {
@@ -226,7 +339,15 @@ export function deleteChat(id: string): ChatSession[] {
 /* ————————————————————— settings ————————————————————— */
 
 function readSettings(): StoredSettings {
-  return { ...DEFAULT_SETTINGS, ...readJson<Partial<StoredSettings>>('settings.json', {}) }
+  const loaded = { ...DEFAULT_SETTINGS, ...readJson<Partial<StoredSettings>>('settings.json', {}) }
+  const legacy = legacyRaw(loaded.aiKeyEnc)
+  if (legacy !== undefined) {
+    sessionAiKey = legacy
+    loaded.aiKeyEnc = secureStorageAvailable() ? encrypt(legacy) : undefined
+    if (loaded.aiKeyEnc) sessionAiKey = undefined
+    writeJson('settings.json', loaded)
+  }
+  return loaded
 }
 
 export function getSettings(): AppSettings {
@@ -234,7 +355,7 @@ export function getSettings(): AppSettings {
   return {
     defaultRowLimit: s.defaultRowLimit,
     confirmDestructive: s.confirmDestructive,
-    hasAiKey: Boolean(s.aiKeyEnc),
+    hasAiKey: Boolean(s.aiKeyEnc || sessionAiKey),
     aiProvider: s.aiProvider,
     aiBaseUrl: s.aiBaseUrl,
     aiModel: s.aiModel
@@ -252,17 +373,25 @@ export function updateSettings(patch: Partial<AppSettings> & { aiKey?: string })
     aiModel: patch.aiModel ?? current.aiModel
   }
   if (patch.aiKey !== undefined) {
-    next.aiKeyEnc = patch.aiKey ? encrypt(patch.aiKey) : undefined
+    if (!patch.aiKey) {
+      next.aiKeyEnc = undefined
+      sessionAiKey = undefined
+    } else if (secureStorageAvailable()) {
+      next.aiKeyEnc = encrypt(patch.aiKey)
+      sessionAiKey = undefined
+    } else {
+      next.aiKeyEnc = undefined
+      sessionAiKey = patch.aiKey
+    }
   }
   writeJson('settings.json', next)
   return getSettings()
 }
 
 export function getAiKey(): string | undefined {
-  return decrypt(readSettings().aiKeyEnc)
+  return decrypt(readSettings().aiKeyEnc) ?? sessionAiKey
 }
 
-/** Endpoint, model and key together, so ai.ts has one place to read from. */
 export function getAiConfig(): {
   provider: AiProvider
   baseUrl: string
@@ -274,6 +403,6 @@ export function getAiConfig(): {
     provider: s.aiProvider,
     baseUrl: s.aiBaseUrl.trim(),
     model: s.aiModel,
-    key: decrypt(s.aiKeyEnc)
+    key: decrypt(s.aiKeyEnc) ?? sessionAiKey
   }
 }
