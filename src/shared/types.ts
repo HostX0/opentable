@@ -80,6 +80,19 @@ export interface DbSchema {
   tables: SchemaTable[]
 }
 
+/** One foreign-key edge in the database-wide schema graph. */
+export interface SchemaRelationship {
+  name: string
+  sourceSchema: string
+  sourceTable: string
+  sourceColumns: string[]
+  targetSchema: string
+  targetTable: string
+  targetColumns: string[]
+  onUpdate?: string
+  onDelete?: string
+}
+
 export interface IndexInfo {
   name: string
   columns: string[]

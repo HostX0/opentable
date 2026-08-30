@@ -5,7 +5,9 @@ import * as db from './db'
 import * as ai from './ai'
 import { checkForUpdates, getUpdateState, initUpdater, quitAndInstall } from './updater'
 import { isDestructive, isUnscopedWrite } from './sqlutil'
+import { getSchemaRelationships } from './schemaGraph'
 import { readSshHosts } from './sshconfig'
+import { splitStatements } from '../shared/sqlscan'
 import type {
   AppSettings,
   ChatMessage,
@@ -119,6 +121,13 @@ function registerHandlers(): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
+  ipcMain.handle('db:relationships', async (_e, id: string) => {
+    try {
+      return { ok: true, relationships: await getSchemaRelationships(id) }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
   ipcMain.handle('db:tableDetails', async (_e, id: string, schema: string, table: string) => {
     try {
       return { ok: true, details: await db.getTableDetails(id, schema, table) }
@@ -154,7 +163,7 @@ function registerHandlers(): void {
   ipcMain.handle('safety:check', (_e, id: string, sql: string) => {
     const settings = store.getSettings()
     const cfg = db.getConfig(id)
-    const statements = db.splitStatements(sql)
+    const statements = splitStatements(sql)
     const unscoped = statements.filter((s) => isUnscopedWrite(s))
     const isProd = cfg?.environment === 'production'
     const needsConfirm =

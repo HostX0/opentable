@@ -21,6 +21,7 @@ const api = {
     query: (id: string, sql: string) => ipcRenderer.invoke('db:query', id, sql),
     cancel: (id: string) => ipcRenderer.invoke('db:cancel', id),
     schema: (id: string) => ipcRenderer.invoke('db:schema', id),
+    relationships: (id: string) => ipcRenderer.invoke('db:relationships', id),
     tableDetails: (id: string, schema: string, table: string) =>
       ipcRenderer.invoke('db:tableDetails', id, schema, table),
     databases: (id: string) => ipcRenderer.invoke('db:databases', id),

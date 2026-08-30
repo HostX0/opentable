@@ -13,6 +13,7 @@ import type {
   PendingChange,
   QueryResult,
   SavedQuery,
+  SchemaRelationship,
   TableDetails
 } from '../shared/types'
 
@@ -51,6 +52,9 @@ declare global {
         ) => Promise<{ ok: boolean; result?: QueryResult; error?: string }>
         cancel: (id: string) => Promise<{ ok: boolean; error?: string }>
         schema: (id: string) => Promise<{ ok: boolean; schema?: DbSchema; error?: string }>
+        relationships: (
+          id: string
+        ) => Promise<{ ok: boolean; relationships?: SchemaRelationship[]; error?: string }>
         tableDetails: (
           id: string,
           schema: string,
