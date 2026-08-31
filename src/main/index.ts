@@ -80,7 +80,10 @@ function registerHandlers(): void {
 
   ipcMain.handle('db:query', async (_e, id: string, sql: string) => {
     const settings = store.getSettings()
-    const cfg = db.getConfig(id) ?? store.getFullConfig(id)
+    // Policy comes from the saved config first so changing Read & write ->
+    // Read only takes effect immediately, even if an existing socket is still
+    // carrying the connection config it was opened with.
+    const cfg = store.getFullConfig(id) ?? db.getConfig(id)
     const access = canRunInAccessMode(cfg?.accessMode, sql)
     if (!access.allowed) return { ok: false, error: access.reason ?? READ_ONLY_ERROR }
 
@@ -161,7 +164,7 @@ function registerHandlers(): void {
   ipcMain.handle(
     'db:applyChanges',
     (_e, id: string, table: { schema: string; name: string }, changes: PendingChange[]) => {
-      const cfg = db.getConfig(id) ?? store.getFullConfig(id)
+      const cfg = store.getFullConfig(id) ?? db.getConfig(id)
       if (cfg?.accessMode === 'read-only') {
         return { ok: false, error: READ_ONLY_ERROR, affected: 0, statements: [] }
       }
@@ -170,7 +173,7 @@ function registerHandlers(): void {
   )
 
   ipcMain.handle('db:alterTable', (_e, id: string, statements: string[]) => {
-    const cfg = db.getConfig(id) ?? store.getFullConfig(id)
+    const cfg = store.getFullConfig(id) ?? db.getConfig(id)
     if (cfg?.accessMode === 'read-only') return { ok: false, error: READ_ONLY_ERROR, applied: 0 }
     return db.applyAlter(id, statements)
   })
@@ -178,7 +181,7 @@ function registerHandlers(): void {
   /* ————— safety ————— */
   ipcMain.handle('safety:check', (_e, id: string, sql: string) => {
     const settings = store.getSettings()
-    const cfg = db.getConfig(id)
+    const cfg = store.getFullConfig(id) ?? db.getConfig(id)
     const statements = splitStatements(sql)
     const unscoped = statements.filter((s) => isUnscopedWrite(s))
     const isProd = cfg?.environment === 'production'
@@ -251,7 +254,7 @@ function registerHandlers(): void {
     async (e, id: string, transcript: ChatMessage[], sql: string, approved: boolean) => {
       try {
         const schema = await db.getSchema(id)
-        const cfg = db.getConfig(id) ?? store.getFullConfig(id)
+        const cfg = store.getFullConfig(id) ?? db.getConfig(id)
         if (approved && cfg?.accessMode === 'read-only') {
           const blocked = {
             sql,
